@@ -1,29 +1,32 @@
 /**
- * PROJECT OVERVIEW: Seasonal Player Data Synchronization
+ * PROJECT OVERVIEW: Seasonal Player Data Synchronization & AI Scouting
  * ==============================================================================
  * This script serves as the central intelligence for youth baseball draft
  * preparations. It automates the complex task of matching registration records,
  * performance stats, and challenge assignments.
  *
- * CURRENT VERSION: 1.0
+ * CURRENT VERSION: 2.0
  * +---------------------------------------------------------------------------------------------------+
  * |                                      CHANGE LOG                                                   |
  * +---------+-------------+---------------------------------------------------------------------------+
  * | VERSION | DATE        | DESCRIPTION                                                               |
  * +---------+-------------+---------------------------------------------------------------------------+
+ * | 2.0     | 2026-01-15  | [Baseline] Official foundation for AI-integrated lineage.                 |
  * | 1.0     | 2026-01-19  | Core sync and logging baseline (UI exposes Update Draft Stats only).      |
  * +---------+-------------+---------------------------------------------------------------------------+
- * * +---------------------------------------------------------------------------------------------------+
+ * * +-------------------------------------------------------------------------------------------------+
  * |                                      FEATURES LIST                                                |
  * +---------------------------------------------------------------------------------------------------+
- * | [Core]   Data Synchronization: Automatic updates from Registrations/Challenge to Draft_Stats.      |
- * | [Core]   New Player Addition: Automatically appends unregistered players to the bottom of board.   |
- * | [Core]   Cleanup: Clears automated data for players no longer in the registration system.          |
+ * | [GenAI]  Scout Assistant: On-demand player analysis and roster evaluation via Gemini 2.5.         |
+ * | [GenAI]  Draft Insights: Automated draft board summaries and top-talent identification.           |
+ * | [GenAI]  Negative Flagging: AI sentiment analysis of "Avoid Coach" requests with RED highlights.  |
+ * | [Core]   Data Synchronization: Automatic updates from Registrations/Challenge to Draft_Stats.     |
+ * | [Core]   New Player Addition: Automatically appends unregistered players to the bottom of board.  |
+ * | [Core]   Cleanup: Clears automated data for players no longer in the registration system.         |
  * | [Core]   Custom Menus: Integrated Google Sheets UI buttons for manual trigger.                    |
- * | [Core]   Logging: Persistent 'Automation Log' tracking with Success/Failed status icons.           |
- * |                                                                                                   |
+ * | [Core]   Logging: Persistent 'Automation Log' tracking with Success/Failed status icons.          |
  * +---------------------------------------------------------------------------------------------------+
- * * +---------------------------------------------------------------------------------------------------+
+ * * +-------------------------------------------------------------------------------------------------+
  * |                                   DATA MAPPING REFERENCE                                          |
  * +-----------------------+-----------------------+---------------------------------------------------+
  * | SOURCE SHEET          | SOURCE COLUMN         | DESTINATION (Draft_Stats)                         |
@@ -42,10 +45,11 @@
 // ============================================================================
 
 /**
- * API key for Gemini. Prefer storing this in project properties
- * and reading it dynamically instead of hard-coding.
+ * API key for Gemini. Stored in Script Properties for security.
+ * To set: Extensions → Apps Script → Project Settings → Script Properties
+ * Add property: GEMINI_API_KEY = your-api-key-here
  */
-const API_KEY = ""; // API key is handled by the environment
+const API_KEY = PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY") || "";
 
 /** Name of the log sheet used for sync runs. */
 const LOG_SHEET_NAME = "Automation Log";
@@ -87,33 +91,40 @@ const NEG_COACH_KEYWORDS = [
   "bust",
 ];
 
-/** Enable extra logging for Negative Coach Assistant (writes to NegCoach_Debug sheet). */
-const NEG_COACH_DEBUG = false;
+/**
+ * DEBUG CONFIGURATION
+ * Enable/disable debug logging per feature. All debug logs go to a single "Debug_Log" sheet.
+ * Set any flag to true to enable detailed logging for that feature.
+ */
+const DEBUG_FLAGS = {
+  NEGATIVE_COACH: false,
+  SCOUTING_ASSISTANT: false,
+  DRAFT_INSIGHTS: false,
+  CORE_SYNC: false,
+};
 
 // ============================================================================
 // MENU ENTRY POINTS
 // ============================================================================
 
 /**
- * Adds the "Gamechanger" menu.
- *
- * v1.0: Only the core "Update Draft Stats" action is exposed.
- * The AI Tools submenu is present in code but commented out here
- * so end users do not see or invoke those helpers.
+ * Adds a single consolidated "Gamechanger" menu with:
+ * - Update Draft Stats
+ * - AI Tools (Negative Coach Assistant, Scouting Assistant, Draft Insights)
  */
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
 
-  // To re-enable AI tools in a future 2.0, uncomment the block below
-  // and add the submenu back onto the Gamechanger menu.
-  // const aiToolsMenu = ui
-  //   .createMenu("AI Tools")
-  //   .addItem("Negative Coach Request Assistant", "runNegativeCoachAssistant")
-  //   .addItem("Scouting Assistant", "askGeminiAdHoc")
-  //   .addItem("Draft Insights", "aiDraftSummary");
+  const aiToolsMenu = ui
+    .createMenu("AI Tools")
+    .addItem("Negative Coach Request Assistant", "runNegativeCoachAssistant")
+    .addItem("Ask AI Scouting Assistant", "askGeminiAdHoc");
+    // .addItem("Draft Insights", "aiDraftSummary");
 
   ui.createMenu("Gamechanger")
     .addItem("Update Draft Stats", "updateStatsFromRegistrations")
+    .addSeparator()
+    .addSubMenu(aiToolsMenu)
     .addToUi();
 }
 
@@ -328,10 +339,14 @@ function updateStatsFromRegistrations() {
   }
 }
 
-// ============================================================================
-// AI TOOLS (SCOUTING & DRAFT INSIGHTS)
-// ============================================================================
+// =================================================================================
+// AI TOOLS (Negative Coaching Request Assistant, Scout Assistant, Draft Insights)
+// =================================================================================
 
+
+// =================================================================================
+// AI TOOLS: Negative Coaching Request Assistant
+// =================================================================================
 /**
  * Scans the "Special Player Requests" column for polite or explicit
  * requests to avoid specific coaches, teams, or families.
@@ -416,7 +431,7 @@ function runNegativeCoachAssistant() {
   }
   if (totalNotesScanned === 0) {
     ui.alert("No Special Player Requests found to analyze.");
-    return;
+    return; 
   }
 
   // Batch size for a single Gemini call
@@ -478,7 +493,7 @@ function runNegativeCoachAssistant() {
       : 0;
 
   const logMessage =
-    `Agent: (Negative Coach Assistant) --- Model: (gemini-2.5-flash-preview-09-2025) --- ` +
+    `Agent: (Negative Coach Assistant) --- Model: (gemini-2.5-flash-lite) --- ` +
     `Possible requests flagged for review (${flaggedCount}) --- ` +
     `Notes scanned: (${notesScanned}) --- ` +
     `Sent to AI: (${sentToAi}) --- ` +
@@ -495,46 +510,56 @@ function runNegativeCoachAssistant() {
 }
 
 /**
- * Generates a 3-sentence scouting report for the currently selected player row
- * in the Draft_Stats sheet using Gemini.
+ * Ask AI Scouting Assistant - accepts open-ended prompts for draft analysis.
+ * Users can ask any question about their draft board and get AI-powered insights.
  */
 function askGeminiAdHoc() {
-  const sheet =
-    SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Draft_Stats");
-  const activeRange = sheet.getActiveRange();
-  const row = activeRange.getRow();
+  showAiScoutInputDialog();
+}
 
-  if (row < 2) {
-    SpreadsheetApp.getUi().alert("Please select a player row first.");
+/**
+ * Processes the user's scouting question after input dialog submission.
+ * Called by the custom HTML input dialog.
+ */
+function processScoutingQuestion(userPrompt) {
+  const ui = SpreadsheetApp.getUi();
+  
+  if (!userPrompt) {
+    ui.alert("Please enter a question for the AI Scouting Assistant.");
     return;
   }
-
-  const data = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-
-  let playerInfo = "";
-  headers.forEach((h, i) => {
-    if (data[i]) playerInfo += `${h}: ${data[i]}\n`;
-  });
-
-  const prompt = `Analyze this baseball player and provide a concise 3-sentence scouting report.\n\nPLAYER DATA:\n${playerInfo}`;
-  const response = callGemini(prompt);
-  // Log AI Scout Assistant usage
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let logSheet =
-    ss.getSheetByName(LOG_SHEET_NAME) || ss.insertSheet(LOG_SHEET_NAME);
-  if (logSheet.getLastRow() === 0) {
-    logSheet.appendRow(["Timestamp", "Source", "Status", "Comments"]);
-    logSheet
-      .getRange(1, 1, 1, 4)
-      .setFontWeight("bold")
-      .setBackground("#f3f3f3");
+  
+  try {
+    // Gather draft board data using helper
+    const draftContext = getDraftBoardContext(50, true);
+    
+    // Build comprehensive prompt with scout persona
+    const fullPrompt = 
+      `You are an experienced youth baseball scout with deep knowledge of player development and draft strategy. ` +
+      `When analyzing players, you think holistically about their overall value - considering batting, pitching, fielding, ` +
+      `age/maturity, and team fit rather than just isolated statistics.\n\n` +
+      `DRAFT BOARD CONTEXT:\n${draftContext.formattedText}\n\n` +
+      `SCOUT QUESTION:\n${userPrompt}\n\n` +
+      `Provide a thoughtful, analytical response that considers multiple factors and gives actionable insights.`;
+    
+    // Show loading message
+    ui.alert("AI Scouting Assistant", "Analyzing draft board... This may take a moment.", ui.ButtonSet.OK);
+    
+    const response = callGeminiScout(fullPrompt);
+    
+    // Log usage with standardized format
+    const queryPreview = userPrompt.length > 50 ? userPrompt.slice(0, 50) + "..." : userPrompt;
+    logAiActivity(
+      "Ask AI Scouting Assistant",
+      "gemini-2.5-flash",
+      `Query: (${queryPreview}) --- Players analyzed: (${Math.min(draftContext.playerCount, 50)})`
+    );
+    
+    showAiScoutDialog("AI Scouting Assistant Response", response, userPrompt);
+    
+  } catch (e) {
+    handleAiError(e, "Ask AI Scouting Assistant");
   }
-
-  const scoutLog = `Scout Assistant run. Agent: (Scout Assistant) --- Model: (gemini-2.5-flash-preview-09-2025) --- Player row: (${row}).`;
-  logSheet.appendRow([new Date(), "AI", "✅ Success", scoutLog]);
-
-  showAiDialog("Scout Report", response);
 }
 
 /**
@@ -542,30 +567,25 @@ function askGeminiAdHoc() {
  * executive-style summary of talent trends using Gemini.
  */
 function aiDraftSummary() {
-  const sheet =
-    SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Draft_Stats");
-  const data = sheet
-    .getRange(1, 1, Math.min(sheet.getLastRow(), 50), sheet.getLastColumn())
-    .getValues();
-  const prompt = `Analyze this draft board and provide a high-level executive summary including top talent trends.\n\nDATA:\n${JSON.stringify(data)}`;
-  const response = callGemini(prompt);
-  // Log AI Draft Insights usage
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let logSheet =
-    ss.getSheetByName(LOG_SHEET_NAME) || ss.insertSheet(LOG_SHEET_NAME);
-  if (logSheet.getLastRow() === 0) {
-    logSheet.appendRow(["Timestamp", "Source", "Status", "Comments"]);
-    logSheet
-      .getRange(1, 1, 1, 4)
-      .setFontWeight("bold")
-      .setBackground("#f3f3f3");
+  try {
+    // Gather draft board data using helper
+    const draftContext = getDraftBoardContext(50, false);
+    
+    const prompt = `Analyze this draft board and provide a high-level executive summary including top talent trends.\n\nDATA:\n${JSON.stringify(draftContext.data)}`;
+    const response = callGemini(prompt);
+    
+    // Log usage with standardized format
+    logAiActivity(
+      "Draft Insights",
+      "gemini-2.5-flash-lite",
+      `Players analyzed: (${draftContext.playerCount}) --- Summary generated`
+    );
+
+    showAiDialog("AI Draft Insights & Executive Summary", response);
+    
+  } catch (e) {
+    handleAiError(e, "Draft Insights");
   }
-
-  const rowsAnalyzed = Math.min(sheet.getLastRow(), 50);
-  const summaryLog = `Draft Insights run. Agent: (Draft Insights) --- Model: (gemini-2.5-flash-preview-09-2025) --- Rows analyzed: (${rowsAnalyzed}).`;
-  logSheet.appendRow([new Date(), "AI", "✅ Success", summaryLog]);
-
-  showAiDialog("AI Draft Insights & Executive Summary", response);
 }
 
 /**
@@ -576,7 +596,7 @@ function aiDraftSummary() {
  * @return {Object<number,string>} Map of index -> FLAG_STRONG | FLAG_POSSIBLE | SAFE.
  */
 function callGeminiForRequestBatch(items) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${API_KEY}`;
   const list = items
     .map(
       (it) => `{ "index": ${it.index}, "request": ${JSON.stringify(it.text)} }`,
@@ -646,8 +666,8 @@ function callGeminiForRequestBatch(items) {
   const statusCode = response.getResponseCode();
   const bodyText = response.getContentText();
 
-  if (NEG_COACH_DEBUG) {
-    logNegCoachDebug_("BATCH_RESPONSE", {
+  if (DEBUG_FLAGS.NEGATIVE_COACH) {
+    logDebug("Negative Coach", "BATCH_RESPONSE", {
       statusCode,
       itemsCount: items.length,
       bodySnippet: bodyText.slice(0, 500),
@@ -658,8 +678,8 @@ function callGeminiForRequestBatch(items) {
   const rawText = outer.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) {
     // Fall back: mark all as SAFE to avoid noisy false positives
-    if (NEG_COACH_DEBUG) {
-      logNegCoachDebug_("NO_RAWTEXT", {
+    if (DEBUG_FLAGS.NEGATIVE_COACH) {
+      logDebug("Negative Coach", "NO_RAWTEXT", {
         outerSnippet: JSON.stringify(outer).slice(0, 500),
       });
     }
@@ -672,16 +692,16 @@ function callGeminiForRequestBatch(items) {
 
   try {
     const parsed = JSON.parse(rawText);
-    if (NEG_COACH_DEBUG) {
-      logNegCoachDebug_("PARSED_LABELS", {
+    if (DEBUG_FLAGS.NEGATIVE_COACH) {
+      logDebug("Negative Coach", "PARSED_LABELS", {
         labels: parsed,
         sampleRequests: items.slice(0, 5),
       });
     }
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch (e) {
-    if (NEG_COACH_DEBUG) {
-      logNegCoachDebug_("PARSE_ERROR", {
+    if (DEBUG_FLAGS.NEGATIVE_COACH) {
+      logDebug("Negative Coach", "PARSE_ERROR", {
         error: String(e),
         rawTextSnippet: rawText.slice(0, 500),
       });
@@ -695,6 +715,241 @@ function callGeminiForRequestBatch(items) {
 }
 
 /**
+ * Calls Gemini Flash (full model) for complex scouting analysis.
+ * Uses higher token limit and reasoning capability than Lite version.
+ *
+ * @param {string} prompt - The prompt text to send to Gemini.
+ * @return {string} Generated text or a fallback message.
+ */
+function callGeminiScout(prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`;
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    systemInstruction: {
+      parts: [
+        {
+          text: "You are an experienced youth baseball scout who analyzes players holistically, " +
+                "considering batting, pitching, fielding, age, maturity, and team dynamics. " +
+                "You provide actionable insights and think strategically about draft picks."
+        },
+      ],
+    },
+    generationConfig: {
+      maxOutputTokens: 2048,
+      temperature: 0.7,
+    },
+  };
+
+  let response;
+  for (let i = 0; i < 5; i++) {
+    try {
+      response = UrlFetchApp.fetch(url, {
+        method: "POST",
+        contentType: "application/json",
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true,
+      });
+      if (response.getResponseCode() === 200) break;
+      Utilities.sleep(Math.pow(2, i) * 1000);
+    } catch (e) {
+      if (i === 4) throw e;
+      Utilities.sleep(Math.pow(2, i) * 1000);
+    }
+  }
+
+  const json = JSON.parse(response.getContentText());
+  return (
+    json.candidates?.[0]?.content?.parts?.[0]?.text || "Scout unavailable - please try again."
+  );
+}
+
+/**
+ * Displays a custom input dialog for asking scouting questions.
+ * Larger and more user-friendly than the default ui.prompt().
+ */
+function showAiScoutInputDialog() {
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <base target="_top">
+      <style>
+        body {
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          padding: 20px;
+          background-color: #f9f9f9;
+          margin: 0;
+        }
+        .header {
+          background-color: #2c5aa0;
+          color: white;
+          padding: 12px 16px;
+          margin: -20px -20px 20px -20px;
+          border-radius: 4px 4px 0 0;
+        }
+        .header h3 {
+          margin: 0;
+          font-size: 16px;
+          font-weight: 600;
+        }
+        .example-box {
+          background-color: #e8f0fe;
+          padding: 12px;
+          border-radius: 4px;
+          margin-bottom: 20px;
+          border-left: 4px solid #2c5aa0;
+          font-size: 13px;
+        }
+        .example-box strong {
+          color: #1a73e8;
+        }
+        textarea {
+          width: 100%;
+          height: 200px;
+          padding: 12px;
+          border: 2px solid #ddd;
+          border-radius: 4px;
+          font-size: 14px;
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          resize: vertical;
+          box-sizing: border-box;
+        }
+        textarea:focus {
+          outline: none;
+          border-color: #2c5aa0;
+        }
+        .button-container {
+          margin-top: 16px;
+          text-align: right;
+        }
+        button {
+          padding: 10px 20px;
+          font-size: 14px;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          margin-left: 8px;
+        }
+        .btn-submit {
+          background-color: #2c5aa0;
+          color: white;
+        }
+        .btn-submit:hover {
+          background-color: #1a4d8f;
+        }
+        .btn-cancel {
+          background-color: #e0e0e0;
+          color: #333;
+        }
+        .btn-cancel:hover {
+          background-color: #d0d0d0;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h3>Ask AI Scouting Assistant</h3>
+      </div>
+      
+      <div class="example-box">
+        <strong>Example Questions:</strong><br>
+        • "If our league prioritizes strong bats who can pitch, give me a list of the top 10 probable picks"<br>
+        • "Which players would be the best team captains based on their stats and maturity?"<br>
+        • "Compare the top 5 pitchers and recommend draft order"
+      </div>
+      
+      <label for="question" style="font-weight: 600; font-size: 14px; display: block; margin-bottom: 8px;">
+        Your Scouting Question:
+      </label>
+      <textarea id="question" placeholder="Enter your question here..."></textarea>
+      
+      <div class="button-container">
+        <button class="btn-cancel" onclick="google.script.host.close()">Cancel</button>
+        <button class="btn-submit" onclick="submitQuestion()">Submit Question</button>
+      </div>
+      
+      <script>
+        function submitQuestion() {
+          const question = document.getElementById('question').value.trim();
+          if (!question) {
+            alert('Please enter a question.');
+            return;
+          }
+          google.script.run
+            .withSuccessHandler(function() {
+              google.script.host.close();
+            })
+            .processScoutingQuestion(question);
+        }
+        
+        // Allow Enter key to submit (with Shift+Enter for new lines)
+        document.getElementById('question').addEventListener('keydown', function(e) {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            submitQuestion();
+          }
+        });
+        
+        // Auto-focus the textarea
+        document.getElementById('question').focus();
+      </script>
+    </body>
+    </html>
+  `;
+  
+  const output = HtmlService.createHtmlOutput(html)
+    .setWidth(700)
+    .setHeight(500);
+  SpreadsheetApp.getUi().showModalDialog(output, 'AI Scouting Assistant');
+}
+
+/**
+ * Displays AI scouting output in a large, user-friendly modal dialog.
+ *
+ * @param {string} title   - Dialog title.
+ * @param {string} content - AI response text to display.
+ * @param {string} userQuery - Original user question.
+ */
+function showAiScoutDialog(title, content, userQuery) {
+  // Debug logging - check if new dimensions are being used
+  if (DEBUG_FLAGS.SCOUTING_ASSISTANT) {
+    logDebug("Scouting Assistant", "DIALOG_DIMENSIONS", {
+      width: 1000,
+      height: 900,
+      contentHeight: 600,
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  const html = `
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #f9f9f9;">
+      <div style="background-color: #2c5aa0; color: white; padding: 12px 16px; margin: -20px -20px 20px -20px; border-radius: 4px 4px 0 0;">
+        <h3 style="margin: 0; font-size: 16px; font-weight: 600;">Your Question</h3>
+      </div>
+      <div style="background-color: #e8f0fe; padding: 12px; border-radius: 4px; margin-bottom: 20px; border-left: 4px solid #2c5aa0;">
+        <p style="margin: 0; font-size: 13px; color: #333; font-style: italic;">"${userQuery}"</p>
+      </div>
+      
+      <div style="background-color: #2c5aa0; color: white; padding: 12px 16px; margin: 0 -20px 20px -20px;">
+        <h3 style="margin: 0; font-size: 16px; font-weight: 600;">AI Scout Analysis</h3>
+      </div>
+      <div style="background-color: white; padding: 16px; border-radius: 4px; border: 1px solid #ddd; height: 600px; overflow-y: scroll; overflow-x: hidden;">
+        <div style="white-space: pre-wrap; font-size: 14px; line-height: 1.7; color: #333;">${content}</div>
+      </div>
+      
+      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #ddd; font-size: 11px; color: #666; text-align: center;">
+        Powered by Gemini 2.5 Flash • Results are AI-generated suggestions • v2.0 (1000x900)
+      </div>
+    </div>
+  `;
+  
+  const output = HtmlService.createHtmlOutput(html)
+    .setWidth(1000)
+    .setHeight(900);
+  SpreadsheetApp.getUi().showModalDialog(output, title);
+}
+
+/**
  * Calls the Gemini model and returns the first text candidate, with
  * basic retry and a safe fallback.
  *
@@ -702,7 +957,7 @@ function callGeminiForRequestBatch(items) {
  * @return {string} Generated text or a fallback message.
  */
 function callGemini(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${API_KEY}`;
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     systemInstruction: {
@@ -749,6 +1004,105 @@ function showAiDialog(title, content) {
     .setWidth(450)
     .setHeight(350);
   SpreadsheetApp.getUi().showModalDialog(output, title);
+}
+
+// ============================================================================
+// AI SHARED UTILITIES
+// ============================================================================
+
+/**
+ * Logs AI tool activity to the Automation Log sheet with standardized format.
+ * 
+ * @param {string} agentName - Name of the AI agent (e.g., "Negative Coach Assistant")
+ * @param {string} modelName - Gemini model used (e.g., "gemini-2.5-flash-lite")
+ * @param {string} details - Tool-specific details (e.g., metrics, results)
+ */
+function logAiActivity(agentName, modelName, details) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let logSheet = ss.getSheetByName(LOG_SHEET_NAME) || ss.insertSheet(LOG_SHEET_NAME);
+  
+  if (logSheet.getLastRow() === 0) {
+    logSheet.appendRow(["Timestamp", "Source", "Status", "Comments"]);
+    logSheet.getRange(1, 1, 1, 4).setFontWeight("bold").setBackground("#f3f3f3");
+  }
+  
+  const logMessage = `Agent: (${agentName}) --- Model: (${modelName}) --- ${details}`;
+  logSheet.appendRow([new Date(), "AI", "✅ Success", logMessage]);
+}
+
+/**
+ * Gathers draft board data for AI analysis.
+ * Extracts player data from Draft_Stats sheet and optionally formats it.
+ * 
+ * @param {number} maxPlayers - Maximum number of players to include in detailed format (default: 50)
+ * @param {boolean} includeDetailedFormat - Whether to return formatted text for AI (default: true)
+ * @return {Object} Object containing headers, data, formattedText (if requested), and playerCount
+ */
+function getDraftBoardContext(maxPlayers = 50, includeDetailedFormat = true) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Draft_Stats");
+  
+  if (!sheet) {
+    throw new Error("Draft_Stats sheet is missing.");
+  }
+  
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    throw new Error("No player data found in Draft_Stats.");
+  }
+  
+  const dataRows = Math.min(lastRow, 200);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const data = sheet.getRange(2, 1, dataRows - 1, sheet.getLastColumn()).getValues();
+  
+  if (includeDetailedFormat) {
+    let playerData = "DRAFT BOARD DATA:\n" + "=".repeat(80) + "\n\n";
+    
+    data.forEach((row, idx) => {
+      if (idx >= maxPlayers) return;
+      
+      playerData += `Player ${idx + 1}:\n`;
+      headers.forEach((header, i) => {
+        if (row[i]) {
+          playerData += `  ${header}: ${row[i]}\n`;
+        }
+      });
+      playerData += "\n";
+    });
+    
+    if (dataRows > maxPlayers) {
+      playerData += `\n(${dataRows - maxPlayers} additional players available in the draft board)\n`;
+    }
+    
+    return { headers, data, formattedText: playerData, playerCount: dataRows - 1 };
+  }
+  
+  return { headers, data, playerCount: dataRows - 1 };
+}
+
+/**
+ * Handles AI tool errors with consistent logging and user alerts.
+ * 
+ * @param {Error} error - The error object that was caught
+ * @param {string} toolName - Name of the AI tool that encountered the error
+ */
+function handleAiError(error, toolName) {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let logSheet = ss.getSheetByName(LOG_SHEET_NAME) || ss.insertSheet(LOG_SHEET_NAME);
+  
+  if (logSheet.getLastRow() === 0) {
+    logSheet.appendRow(["Timestamp", "Source", "Status", "Comments"]);
+    logSheet.getRange(1, 1, 1, 4).setFontWeight("bold").setBackground("#f3f3f3");
+  }
+  
+  const errorMsg = `Agent: (${toolName}) --- Error: ${error.message}`;
+  logSheet.appendRow([new Date(), "AI", "❌ Failed", errorMsg]);
+  
+  ui.alert(
+    `${toolName} Error`,
+    `Failed to complete analysis:\n\n${error.message}`,
+    ui.ButtonSet.OK
+  );
 }
 
 // ============================================================================
@@ -802,37 +1156,50 @@ function isExcludedDiv(divName) {
 }
 
 /**
- * Internal helper: logs Negative Coach Assistant debug info
- * into a NegCoach_Debug sheet without interrupting main flow.
+ * Unified debug logging helper - logs debug info to a single "Debug_Log" sheet.
+ * All features use this shared infrastructure.
+ * 
+ * @param {string} feature - Feature name (e.g., "Negative Coach", "Scouting Assistant")
+ * @param {string} event - Event description (e.g., "BATCH_RESPONSE", "API_CALL")
+ * @param {Object} payload - Data to log (will be JSON stringified)
  */
-function logNegCoachDebug_(event, payload) {
+function logDebug(feature, event, payload) {
   try {
-    // Also send a compact version to the Apps Script log for quick inspection.
+    // Also send to Apps Script log for quick console inspection
     try {
       Logger.log(
-        "[NegCoach] %s :: %s",
+        "[%s] %s :: %s",
+        feature,
         event,
         JSON.stringify(payload).slice(0, 1000),
       );
     } catch (logErr) {
-      // Ignore logging errors.
+      // Ignore logging errors
     }
 
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheetName = "NegCoach_Debug";
+    const sheetName = "Debug_Log";
     let sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
 
+    // Initialize headers if new sheet
     if (sheet.getLastRow() === 0) {
-      sheet.appendRow(["Timestamp", "Event", "Payload JSON"]);
-      sheet.getRange(1, 1, 1, 3).setFontWeight("bold").setBackground("#f3f3f3");
+      sheet.appendRow(["Timestamp", "Feature", "Event", "Payload JSON"]);
+      sheet.getRange(1, 1, 1, 4).setFontWeight("bold").setBackground("#f3f3f3");
+      sheet.setFrozenRows(1);
+      sheet.setColumnWidth(1, 180); // Timestamp
+      sheet.setColumnWidth(2, 150); // Feature
+      sheet.setColumnWidth(3, 150); // Event
+      sheet.setColumnWidth(4, 600); // Payload
     }
 
+    // Append debug entry
     sheet.appendRow([
       new Date(),
+      feature,
       event,
       JSON.stringify(payload).slice(0, 50000),
     ]);
   } catch (e) {
-    // Swallow errors; debug logging should never break the main script.
+    // Swallow errors; debug logging should never break the main script
   }
 }
