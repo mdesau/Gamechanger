@@ -2,570 +2,199 @@
  * PROJECT OVERVIEW: Stats Alignment Pipeline (Staging → Raw_Stats)
  * @OnlyCurrentDoc
  * ==============================================================================
- * This script normalizes coach-provided CSV stat files into a single, consistent
- * master table (Raw_Stats) used by downstream draft prep tools.
- * It is designed to handle messy, inconsistent headers and section layouts
- * across multiple teams, seasons, and stat providers.
+ * Standardizes GameChanger CSV stat files into a consistent Raw_Stats table
+ * using direct string mapping for reliable high-column count processing (180+).
  *
- * CURRENT VERSION: 6.3
- * +---------------------------------------------------------------------------------------------------+
- * |                                      CHANGE LOG                                                   |
- * +---------+-------------+-------------+-------------------------------------------------------------+
- * | VERSION | DATE        | STATUS      | DESCRIPTION                                                 |
- * +---------+-------------+-------------+-------------------------------------------------------------+
- * | 6.3     | 2026-01-12  | ACTIVE      | [Refactor] Batch AI mapping for Tier 4 residual stats.      |
- * | 6.2     | 2026-01-12  | STABLE      | [Logic] Dynamic header detection & AI section anchoring.    |
- * | 6.1     | 2026-01-12  | STABLE      | [Refine] Added "glossary" filter & improved fail logging.   |
- * | 6.0     | 2026-01-11  | STABLE      | [Milestone] Hybrid Direct + Dynamic AI mapping introduced.  |
- * | 5.0     | 2026-01-11  | STABLE      | [Legacy] AI-only mapping for league-wide stats.             |
- * | 4.6     | 2026-01-11  | STABLE      | [Legacy] Direct-only mapping for single-team stats.         |
- * +---------+-------------+-------------+-------------------------------------------------------------+
+ * CURRENT VERSION: 1.0
+ * +-----------------------------------------------------------------------------+
+ * |                            CHANGE LOG                                       |
+ * +---------+-------------+-------------------------------------------------------+
+ * | VERSION | DATE        | DESCRIPTION                                           |
+ * +---------+-------------+-------------------------------------------------------+
+ * | 1.0     | 2026-01-11  | Initial release: Direct mapping pipeline (no AI)      |
+ * +---------+-------------+-------------------------------------------------------+
  *
- * +---------------------------------------------------------------------------------------------------+
- * |                                      FEATURES LIST                                                |
- * +---------------------------------------------------------------------------------------------------+
- * | [Core]   Staging Import: Reads coach .csv exports pasted/imported into the Staging tab.          |
- * | [Core]   Header Detection: Auto-detects 2-row sectional vs 1-row flat headers.                   |
- * | [Core]   Tiered Mapping: Exact, Synonym, Identity, and AI-based residual mapping.                |
- * | [Core]   Data Cleaning: Filters junk rows (Totals, Glossary, blanks) before loading.             |
- * | [Core]   Master Injection: Appends aligned rows into Raw_Stats with a consistent column model.   |
- * | [Core]   Locking: Uses ScriptLock to prevent overlapping runs on large imports.                   |
- * | [GenAI]  Section Profiling: AI labels Batting/Pitching/Fielding zones for 1-row header layouts.  |
- * | [GenAI]  Batch Residuals: Single-call mapping for all unknown stats using Gemini JSON output.    |
- * | [Audit]  Automation_Logs: Visual reconciliation of which staging header filled each master col.  |
- * +---------------------------------------------------------------------------------------------------+
+ * +-----------------------------------------------------------------------------+
+ * |                            FEATURES                                         |
+ * +-----------------------------------------------------------------------------+
+ * | [Core]   Direct String Mapping: Exact header matching without AI           |
+ * | [Core]   2-Row Header Support: Handles section + stat name headers         |
+ * | [Core]   Identity Detection: Jersey #, First Name, Last Name hard-coded    |
+ * | [Core]   Data Cleaning: Filters Totals, Team, Glossary rows                |
+ * | [Core]   Visual Audit Logs: Two-row reconciliation showing source→master   |
+ * | [Core]   Extra Stat Detection: Identifies unmapped source columns          |
+ * | [Core]   ScriptLock: Prevents concurrent runs on large imports             |
+ * +-----------------------------------------------------------------------------+
  *
- * +---------------------------------------------------------------------------------------------------+
- * |                                  HIGH-LEVEL WORKFLOW                                             |
- * +---------------------------------------------------------------------------------------------------+
- * | 1) User loads a single coach .csv into Staging.                                                  |
- * | 2) aggregateAndAlignStats() inspects header density to choose 2-row or 1-row path.               |
- * | 3) Staging headers are converted into sectioned keys (e.g., Batting_AVG, Pitching_IP).           |
- * | 4) Keys are matched to Raw_Stats via exact, synonym, or identity rules.                          |
- * | 5) Any remaining unknowns are batch-sent to Gemini for best-fit master mapping.                  |
- * | 6) Valid player rows are filtered, aligned, and appended to Raw_Stats.                           |
- * | 7) Automation_Logs records a full before/after view of the mapping for audit and debugging.      |
- * +---------------------------------------------------------------------------------------------------+
+ * +-----------------------------------------------------------------------------+
+ * |                         PROCESS FLOW                                        |
+ * +-----------------------------------------------------------------------------+
+ * | 1. Paste .csv data into "Staging" sheet                                     |
+ * | 2. Extract 2-row headers and data from Staging                              |
+ * | 3. Map sections (Batting/Pitching/Fielding) and match to Raw_Stats headers  |
+ * | 4. Filter junk rows (Totals, Team, Glossary)                                |
+ * | 5. Align staging columns to master schema                                   |
+ * | 6. Log reconciliation details and append to Raw_Stats                       |
+ * +-----------------------------------------------------------------------------+
  */
 
-// ============================================================================
-// CONFIGURATION & CONSTANTS
-// ============================================================================
-
-/**
- * Global configuration for the Stats Align Pipeline.
- */
 const CONFIG = {
-  VERSION: "6.3-Batch-Stable",
-  AI_MODEL: "gemini-2.5-flash-preview-09-2025",
-  COLORS: {
-    AI_MATCH: "#d9e9ff",
-    SUCCESS_BG: "#fff2cc",
-  },
+  VERSION: "1.0"
 };
 
-/**
- * Human-friendly header phrases mapped to standardized master keys.
- */
-const SYNONYM_MAP = {
-  "first name": "General_First",
-  "last name": "General_Last",
-  "jersey number": "General_Number",
-  team: "General_Team",
-  "games played": "Batting_GP",
-  "plate appearances": "Batting_PA",
-  "batting average": "Batting_AVG",
-  "quality at-bats": "Batting_QAB",
-  "runs batted in": "Batting_RBI",
-  hits: "Batting_H",
-  "on-base percentage": "Batting_OBP",
-  "slugging percentage": "Batting_SLG",
-  "on-base percentage + slugging percentage": "Batting_OPS",
-  doubles: "Batting_2B",
-  triples: "Batting_3B",
-  "home runs": "Batting_HR",
-  "innings pitched": "Pitching_IP",
-  "earned run average": "Pitching_ERA",
-  wins: "Pitching_W",
-  strikeouts: "Pitching_SO",
-  "walks hits innings pitched": "Pitching_WHIP",
-  "batting average against": "Pitching_BAA",
-  "fielding percentage": "Fielding_FPCT",
-  putouts: "Fielding_PO",
-};
-
-// ============================================================================
-// MENU ENTRY POINTS
-// ============================================================================
-
-/**
- * Adds the GC Automation menu for running the Stats Align pipeline
- * and opening the Automation Logs sheet.
- */
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  ui.createMenu("GC Automation")
-    .addItem("Import & Align Staging Data", "aggregateAndAlignStats")
-    .addSeparator()
-    .addItem("View Automation Logs", "openLogsSheet")
-    .addToUi();
+  ui.createMenu('GC Automation')
+      .addItem('Align & Import Staging Data', 'aggregateAndAlignStats')
+      .addSeparator()
+      .addItem('View Automation Logs', 'openLogsSheet')
+      .addToUi();
 }
 
-// ============================================================================
-// CORE PIPELINE ENTRY POINT
-// ============================================================================
-
-/**
- * Main execution function for the Stats Align pipeline.
- *
- * High-level steps:
- * 1) Inspect Staging header structure (1-row vs 2-row sectional).
- * 2) Build staging keys and master keys.
- * 3) Perform tiered mapping (Exact, Synonym, Identity, Batch AI).
- * 4) Filter and align player rows.
- * 5) Log reconciliation details and append to Raw_Stats.
- */
 function aggregateAndAlignStats() {
   const ui = SpreadsheetApp.getUi();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const stagingSheet = ss.getSheetByName("Staging");
   const rawStatsSheet = ss.getSheetByName("Raw_Stats");
-  const logSheet =
-    ss.getSheetByName("Automation_Logs") || ss.insertSheet("Automation_Logs");
+  const logSheet = ss.getSheetByName("Automation_Logs") || ss.insertSheet("Automation_Logs");
   const tz = ss.getSpreadsheetTimeZone();
-  const timestamp = Utilities.formatDate(
-    new Date(),
-    tz,
-    "yyyy-MM-dd HH:mm:ss z",
-  );
 
   const lock = LockService.getScriptLock();
-  try {
-    lock.waitLock(10000);
-  } catch (e) {
-    ui.alert("⚠️ System busy.");
-    return;
-  }
+  try { lock.waitLock(10000); } catch (e) { ui.alert("⚠️ System busy."); return; }
 
   try {
-    // 1) Read full Staging data and ensure minimum structure
-    const fullStagingData = stagingSheet.getDataRange().getValues();
-    if (fullStagingData.length < 2)
-      throw new Error(
-        "Staging sheet needs at least headers and one row of data.",
-      );
+    if (stagingSheet.getLastRow() < 3) throw new Error("Staging sheet is empty.");
+    
+    // 1. DATA EXTRACTION
+    const masterFullRange = rawStatsSheet.getRange(1, 1, 2, rawStatsSheet.getLastColumn()).getValues();
+    const stagingHeaderRow1 = stagingSheet.getRange(1, 1, 1, stagingSheet.getLastColumn()).getValues()[0];
+    const stagingHeaderRow2 = stagingSheet.getRange(2, 1, 1, stagingSheet.getLastColumn()).getValues()[0];
+    const stagingData = stagingSheet.getDataRange().getValues().slice(2);
 
-    // 2) Dynamic header determination: 2-row sectional vs 1-row worded
-    const row1 = fullStagingData[0];
-    const row2 = fullStagingData[1];
-    const r1Filled = row1.filter((c) => c.toString().trim() !== "").length;
-    const r2Filled = row2.filter((c) => c.toString().trim() !== "").length;
-
-    let stagingKeys, stagingData, stagingHeaderNames;
-
-    if (r1Filled < r2Filled * 0.5) {
-      stagingKeys = createSectionHeaderArray(row1, row2);
-      stagingHeaderNames = row2;
-      stagingData = fullStagingData.slice(2);
-    } else {
-      stagingKeys = generateAISectionProfile(row1);
-      stagingHeaderNames = row1;
-      stagingData = fullStagingData.slice(1);
-    }
-
-    // 3) Master prep: build master keys & column map from Raw_Stats
-    const masterFullRange = rawStatsSheet
-      .getRange(1, 1, 2, rawStatsSheet.getLastColumn())
-      .getValues();
-    const masterKeys = createSectionHeaderArray(
-      masterFullRange[0],
-      masterFullRange[1],
-    );
-    const masterColMap = {};
-    masterKeys.forEach((key, idx) => {
-      if (key) masterColMap[key] = idx;
+    // 2. CREATE MASTER MAP (Section_Header)
+    let masterColMap = {};
+    let mSec = "General";
+    masterFullRange[0].forEach((c, i) => {
+      let v = (c || "").toString().toLowerCase();
+      if (v.includes("batting") || v.includes("hitting")) mSec = "Batting";
+      else if (v.includes("pitching")) mSec = "Pitching";
+      else if (v.includes("fielding")) mSec = "Fielding";
+      if (masterFullRange[1][i]) masterColMap[mSec + "_" + masterFullRange[1][i].toString().trim()] = i;
     });
 
-    let finalMap = {};
-    let unmappedIndices = [];
-    let aiMappedKeys = [];
+    // 3. CREATE STAGING MAP (Direct Match Logic)
+    let alignMap = {};
+    let sSec = "General";
+    let stagingKeys = [];
 
-    // 4) Tiered mapping (Tiers 1–3: Exact, Synonym, Identity)
-    stagingKeys.forEach((sKey, idx) => {
-      if (!sKey) return;
-      const hTextLower = (stagingHeaderNames[idx] || "")
-        .toString()
-        .toLowerCase()
-        .trim();
+    stagingHeaderRow2.forEach((h, i) => {
+      let v1 = (stagingHeaderRow1[i] || "").toString().toLowerCase();
+      if (v1.includes("batting") || v1.includes("hitting")) sSec = "Batting";
+      else if (v1.includes("pitching")) sSec = "Pitching";
+      else if (v1.includes("fielding")) sSec = "Fielding";
+      
+      let headerText = (h || "").toString().trim();
+      let sKey = sSec + "_" + headerText;
+      stagingKeys.push(sKey);
 
-      if (masterColMap[sKey] !== undefined) {
-        finalMap[sKey] = sKey;
-      } else if (SYNONYM_MAP[hTextLower]) {
-        finalMap[sKey] = SYNONYM_MAP[hTextLower];
-      } else if (headerIsIdentity(hTextLower)) {
-        finalMap[sKey] = "General_" + mapIdentity(hTextLower);
-      } else if (!hTextLower.includes("(rank)")) {
-        unmappedIndices.push(idx);
-      }
+      // Identity Direct Matches
+      if (headerText === "#" || headerText.toLowerCase() === "number") alignMap[sKey] = "General_Number";
+      else if (headerText.toLowerCase() === "first") alignMap[sKey] = "General_First";
+      else if (headerText.toLowerCase() === "last") alignMap[sKey] = "General_Last";
+      else if (masterColMap[sKey] !== undefined) alignMap[sKey] = sKey;
     });
 
-    // 5) Refactored Tier 4: Batch residual AI mapping
-    if (unmappedIndices.length > 0) {
-      const availableMaster = masterKeys.filter(
-        (k) => !Object.values(finalMap).includes(k),
-      );
-      const sourceTargets = unmappedIndices.map((i) => ({
-        key: stagingKeys[i],
-        context: stagingHeaderNames.slice(Math.max(0, i - 5), i + 6).join(", "),
-      }));
+    // 4. RECONCILIATION & AUDIT PREP
+    let totalProcessableStats = 0, statsAligned = 0, statsExtra = 0, statsMissing = 0;
+    let listExtra = [], listMissing = [];
+    let visualAuditRow = new Array(masterFullRange[1].length).fill(""); 
 
-      const batchMappings = callBatchResidualAI(sourceTargets, availableMaster);
-
-      for (const [sKey, mKey] of Object.entries(batchMappings)) {
-        if (mKey && masterColMap[mKey] !== undefined) {
-          finalMap[sKey] = mKey;
-          aiMappedKeys.push(mKey);
-        }
-      }
-    }
-
-    // 6) Reconciliation and data processing
-    let totalStatsInSource = 0,
-      alignedCount = 0;
-    let visualAuditRow = new Array(masterFullRange[1].length).fill("");
-
-    stagingKeys.forEach((sKey, idx) => {
-      const hText = stagingHeaderNames[idx];
-      if (hText && !hText.toString().toLowerCase().includes("rank")) {
-        totalStatsInSource++;
-        const target = finalMap[sKey];
-        if (target && masterColMap[target] !== undefined) {
-          alignedCount++;
-          visualAuditRow[masterColMap[target]] = hText;
+    // STAGING RECON
+    stagingHeaderRow2.forEach((h, idx) => {
+      const hText = (h || "").toString().trim();
+      if (hText && !hText.toLowerCase().includes("rank")) {
+        totalProcessableStats++;
+        const sKey = stagingKeys[idx];
+        if (alignMap[sKey]) {
+          statsAligned++;
+          visualAuditRow[masterColMap[alignMap[sKey]]] = hText;
+        } else {
+          statsExtra++;
+          listExtra.push(`[EXTRA] ${hText}`);
         }
       }
     });
 
-    const alignedRes = processPlayerData(
-      stagingData,
-      stagingKeys,
-      finalMap,
-      masterColMap,
-      masterFullRange[1].length,
-    );
-    if (alignedRes.data.length === 0)
-      throw new Error("No player rows aligned.");
-
-    // 7) Logging and data injection into Raw_Stats
-    const missingInSource = masterKeys.filter(
-      (k) => k && !Object.values(finalMap).includes(k),
-    ).length;
-    const extraInSource = totalStatsInSource - alignedCount;
-    const reconMsg = `${totalStatsInSource} source stats, ${alignedCount} aligned, ${missingInSource} missing, ${extraInSource} extra, ${aiMappedKeys.length} AI Mappings`;
-
-    logData(
-      logSheet,
-      timestamp,
-      reconMsg,
-      alignedRes.playerRange,
-      masterFullRange[1],
-      visualAuditRow,
-      aiMappedKeys,
-      masterColMap,
-    );
-
-    rawStatsSheet
-      .getRange(
-        rawStatsSheet.getLastRow() + 1,
-        1,
-        alignedRes.data.length,
-        masterFullRange[1].length,
-      )
-      .setValues(alignedRes.data)
-      .setBackground(CONFIG.COLORS.SUCCESS_BG);
-
-    const alertMsg = `${alignedRes.playerRange}\n\n${reconMsg}`;
-    ui.alert("Import Successful", alertMsg, ui.ButtonSet.OK);
-  } catch (err) {
-    logSheet.appendRow([timestamp, "❌ FAILED", err.message, "---", "---"]);
-    ui.alert("⚠️ Error: " + err.message);
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// ============================================================================
-// AI MAPPING UTILITIES
-// ============================================================================
-
-/**
- * Optimized batch AI logic: maps all residual stats in a single API call.
- *
- * @param {Array<{key: string, context: string}>} sources - Unmapped stat keys with context.
- * @param {string[]} masterOptions - Master keys that are still available to map to.
- * @return {Object<string, string|null>} Map of source key → master key (or null).
- */
-function callBatchResidualAI(sources, masterOptions) {
-  if (sources.length === 0) return {};
-
-  const sourcesText = sources
-    .map((s) => `[Stat: "${s.key}", Context: "${s.context}"]`)
-    .join("\n");
-  const prompt = `Map these baseball stat headers to the best MASTER keys.
-  MASTER OPTIONS: ${masterOptions.join(", ")}
-  
-  SOURCE DATA:
-  ${sourcesText}
-  
-  Return a JSON object: {"Source_Key": "Master_Key"}
-  If no strong match exists, return null for that key. Only use keys from MASTER OPTIONS.`;
-
-  try {
-    const resp = callGemini(prompt, true);
-    return JSON.parse(resp);
-  } catch (e) {
-    console.error("Batch AI Failed: " + e.message);
-    return {};
-  }
-}
-
-/**
- * AI logic that profiles a single row of headers and determines
- * whether each column belongs to Batting, Pitching, Fielding, or General.
- *
- * @param {string[]} headers - Raw header text from the staging sheet.
- * @return {string[]} Array of section-prefixed keys, same length as headers.
- */
-function generateAISectionProfile(headers) {
-  const prompt = `Analyze these baseball headers and categorize them into sections: Batting, Pitching, Fielding, or General.
-  Headers: ${headers.join(" | ")}
-  Rules: IP/ERA/WHIP define Pitching. AVG/HR/RBI define Batting. PO/A/E define Fielding. Name/Number/Team are General.
-  Return JSON array of strings: ["Section_HeaderName", ...] exactly matching the input array length.`;
-  const resp = callGemini(prompt, true);
-  return JSON.parse(resp);
-}
-
-/**
- * Processes staging data rows, filters out junk (totals, glossary, blanks),
- * and returns aligned player rows ready for insertion into Raw_Stats.
- *
- * @param {any[][]} data - Staging data rows (after header rows).
- * @param {string[]} keys - Staging section keys per column.
- * @param {Object<string, string>} map - Mapping of staging key → master key.
- * @param {Object<string, number>} colMap - Master key → master column index.
- * @param {number} rowLength - Total columns in the master sheet.
- * @return {{data: any[][], playerRange: string}} Cleaned rows and summary string.
- */
-function processPlayerData(data, keys, map, colMap, rowLength) {
-  let aligned = [];
-  let names = [];
-  data.forEach((row) => {
-    const rowString = row.join("").trim();
-    if (rowString === "") return;
-
-    const isJunk = row.some((cell) => {
-      const val = (cell || "").toString().toLowerCase();
-      return val.includes("total") || val.includes("glossary");
-    });
-    if (isJunk) return;
-
-    let newRow = new Array(rowLength).fill("");
-    let matchedCount = 0;
-    let hasIdentity = false;
-    let pLast = "Unknown",
-      pNum = "";
-
-    row.forEach((cell, idx) => {
-      let target = map[keys[idx]];
-      if (target && colMap[target] !== undefined) {
-        newRow[colMap[target]] = cell;
-        matchedCount++;
-
-        if (
-          target.includes("Last") ||
-          target.includes("First") ||
-          target.includes("Name")
-        ) {
-          const cellVal = (cell || "").toString().trim();
-          if (cellVal !== "") {
-            hasIdentity = true;
-            if (target.includes("Last")) pLast = cellVal;
-          }
-        }
-        if (target.includes("Number")) pNum = (cell || "").toString().trim();
+    // MASTER RECON (Missing)
+    const mappedTargets = Object.values(alignMap);
+    Object.keys(masterColMap).forEach(mKey => {
+      if (!mappedTargets.includes(mKey)) {
+        statsMissing++;
+        listMissing.push(mKey);
       }
     });
 
-    if (matchedCount > 1 && hasIdentity) {
-      aligned.push(newRow);
-      const displayName = pNum ? `${pNum} ${pLast}` : pLast;
-      names.push(displayName);
+    // 5. ROW PROCESSING
+    let alignedData = [];
+    let playerLogNames = [];
+    stagingData.forEach((row) => {
+      const colA = (row[0] || "").toString().toLowerCase();
+      const colB = (row[1] || "").toString().toLowerCase();
+      const isJunk = (val) => val.includes("total") || val.includes("team") || val.includes("glossary");
+      if ((!colA && !colB) || isJunk(colA) || isJunk(colB)) return;
+
+      let newRow = new Array(masterFullRange[1].length).fill("");
+      let matchedInRow = 0;
+      let pLast = "Unknown", pNum = "?";
+      row.forEach((cellValue, colIdx) => {
+        let targetKey = alignMap[stagingKeys[colIdx]];
+        if (targetKey && masterColMap[targetKey] !== undefined) {
+          let targetIdx = masterColMap[targetKey];
+          newRow[targetIdx] = cellValue;
+          matchedInRow++;
+          if (targetKey === "General_Last") pLast = cellValue;
+          if (targetKey === "General_Number") pNum = cellValue;
+        }
+      });
+      if (matchedInRow > 0) {
+        alignedData.push(newRow);
+        playerLogNames.push(`${pNum} ${pLast}`); 
+      }
+    });
+
+    if (alignedData.length === 0) throw new Error("No player rows aligned.");
+
+    // 6. LOGGING & INJECTION
+    const timestamp = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss z");
+    const playerRangeMsg = `Imported ${playerLogNames.length} players between ${playerLogNames[0]} and ${playerLogNames[playerLogNames.length - 1]}`;
+    const reconMsg = `${totalProcessableStats} total stats, ${statsAligned} aligned, ${statsMissing} missing, ${statsExtra} extra`;
+
+    logSheet.appendRow([timestamp, "✅ SUCCESS (v" + CONFIG.VERSION + ")", playerRangeMsg, "Raw Stats ->", ...masterFullRange[1]]);
+    
+    // VISUAL TRIM FOR LOG
+    let lastFilledIdx = -1;
+    for (let i = visualAuditRow.length - 1; i >= 0; i--) {
+      if (visualAuditRow[i] !== "") { lastFilledIdx = i; break; }
     }
-  });
+    const trimmedAuditRow = (lastFilledIdx === -1) ? [] : visualAuditRow.slice(0, lastFilledIdx + 1);
 
-  let playerRangeStr = `Imported ${names.length} players`;
-  if (names.length > 0) {
-    playerRangeStr += ` between ${names[0]} to ${names[names.length - 1]}`;
-  }
+    const stagingLogRow = ["", "", reconMsg, "Staging ->"].concat(trimmedAuditRow).concat(listExtra);
+    logSheet.appendRow(stagingLogRow);
+    
+    logSheet.getRange(logSheet.getLastRow(), 1, 1, logSheet.getLastColumn()).setBorder(null, null, true, null, null, null, "#444444", SpreadsheetApp.BorderStyle.SOLID);
 
-  return { data: aligned, playerRange: playerRangeStr };
+    rawStatsSheet.getRange(rawStatsSheet.getLastRow() + 1, 1, alignedData.length, masterFullRange[1].length)
+                .setValues(alignedData).setBackground("#fff2cc");
+
+    ui.alert('Import Successful', `${playerRangeMsg}\n\n${reconMsg}`, ui.ButtonSet.OK);
+
+  } catch (err) { ui.alert("⚠️ Error: " + err.message); } finally { lock.releaseLock(); }
 }
 
-/**
- * Handles visual audit logging into the Automation_Logs sheet, including:
- * - A success header row with master headers.
- * - A staging-to-master reconciliation row with AI mappings highlighted.
- *
- * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - Automation_Logs sheet.
- * @param {string} ts - Timestamp string.
- * @param {string} recon - Reconciliation summary message.
- * @param {string} range - Human-readable player range description.
- * @param {any[]} masterHeaders - Second row of Raw_Stats (stat names).
- * @param {any[]} auditRow - Visual audit row aligned to master headers.
- * @param {string[]} aiKeys - Master keys that were filled via AI.
- * @param {Object<string, number>} colMap - Master key → master column index.
- */
-function logData(
-  sheet,
-  ts,
-  recon,
-  range,
-  masterHeaders,
-  auditRow,
-  aiKeys,
-  colMap,
-) {
-  sheet.appendRow([
-    ts,
-    "✅ SUCCESS (v" + CONFIG.VERSION + ")",
-    range,
-    "Raw Stats ->",
-    ...masterHeaders,
-  ]);
-  let lastFilledIdx = -1;
-  for (let i = auditRow.length - 1; i >= 0; i--) {
-    if (auditRow[i] !== "") {
-      lastFilledIdx = i;
-      break;
-    }
-  }
-  const trimmed =
-    lastFilledIdx === -1 ? [] : auditRow.slice(0, lastFilledIdx + 1);
-  sheet.appendRow([ts, "", recon, "Staging ->"].concat(trimmed));
-
-  const lastRow = sheet.getLastRow();
-  aiKeys.forEach((mKey) => {
-    const colIdx = colMap[mKey] + 5;
-    if (colIdx <= sheet.getLastColumn())
-      sheet.getRange(lastRow, colIdx).setBackground(CONFIG.COLORS.AI_MATCH);
-  });
-  sheet
-    .getRange(lastRow, 1, 1, sheet.getLastColumn())
-    .setBorder(
-      null,
-      null,
-      true,
-      null,
-      null,
-      null,
-      "#444444",
-      SpreadsheetApp.BorderStyle.SOLID,
-    );
-}
-
-// ============================================================================
-// HEADER & IDENTITY HELPERS
-// ============================================================================
-
-/**
- * Builds an array of section-prefixed header keys from a 2-row header.
- *
- * Row1 contains section labels (Batting/Pitching/Fielding), row2 contains
- * individual stat names.
- *
- * @param {any[]} r1 - First header row (section labels).
- * @param {any[]} r2 - Second header row (stat names).
- * @return {Array<string|null>} Array of "Section_Stat" keys or null.
- */
-function createSectionHeaderArray(r1, r2) {
-  let sec = "General";
-  return r2.map((h, i) => {
-    let v = (r1[i] || "").toString().toLowerCase();
-    if (v.includes("batting") || v.includes("hitting")) sec = "Batting";
-    else if (v.includes("pitching")) sec = "Pitching";
-    else if (v.includes("fielding")) sec = "Fielding";
-    return h ? sec + "_" + h.toString().trim() : null;
-  });
-}
-
-/**
- * Returns true if a lowercased header string appears to describe
- * an identity field (name, number, team).
- *
- * @param {string} text
- * @return {boolean}
- */
-function headerIsIdentity(text) {
-  return ["first", "last", "name", "#", "number", "jersey", "team"].some((i) =>
-    text.includes(i),
-  );
-}
-
-/**
- * Maps a lowercased identity header string to a canonical identity key
- * component (First, Last, Number, Team, or Name).
- *
- * @param {string} text
- * @return {string}
- */
-function mapIdentity(text) {
-  if (text.includes("first")) return "First";
-  if (text.includes("last")) return "Last";
-  if (text.includes("#") || text.includes("number")) return "Number";
-  if (text.includes("team")) return "Team";
-  return "Name";
-}
-
-// ============================================================================
-// GEMINI CLIENT
-// ============================================================================
-
-/**
- * Low-level Gemini client helper. Sends a prompt to the configured
- * AI model and returns the raw text from the first candidate.
- *
- * @param {string} prompt - Prompt text.
- * @param {boolean} [isJson=false] - Whether to request JSON-formatted output.
- * @return {string} Raw text/JSON string from Gemini.
- */
-function callGemini(prompt, isJson = false) {
-  const apiKey =
-    PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${CONFIG.AI_MODEL}:generateContent?key=${apiKey}`;
-  const payload = { contents: [{ parts: [{ text: prompt }] }] };
-  if (isJson)
-    payload.generationConfig = { responseMimeType: "application/json" };
-  const options = {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-  };
-  const resp = UrlFetchApp.fetch(url, options);
-  const json = JSON.parse(resp.getContentText());
-  if (json.error) throw new Error("API Error: " + json.error.message);
-  return json.candidates[0].content.parts[0].text;
-}
-
-// ============================================================================
-// UI HELPERS
-// ============================================================================
-
-/**
- * Activates the Automation_Logs sheet if it exists.
- */
 function openLogsSheet() {
-  const s =
-    SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Automation_Logs");
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = ss.getSheetByName("Automation_Logs");
   if (s) s.activate();
 }
+
+*/
