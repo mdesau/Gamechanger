@@ -5,12 +5,18 @@
  * preparations. It automates the complex task of matching registration records,
  * performance stats, and challenge assignments.
  *
- * CURRENT VERSION: 2.0
+ * CURRENT VERSION: 2.1
  * +---------------------------------------------------------------------------------------------------+
  * |                                      CHANGE LOG                                                   |
  * +---------+-------------+---------------------------------------------------------------------------+
  * | VERSION | DATE        | DESCRIPTION                                                               |
  * +---------+-------------+---------------------------------------------------------------------------+
+ * | 2.1     | 2026-01-23  | Enhanced sync accounting: Added "Already Updated" vs "Updated" tracking, |
+ * |         |             | "NOT Updated" verification check, improved UI messaging, workflow docs.   |
+ * |         |             | Fixed duplicate registration handling: prioritizes draft-eligible         |
+ * |         |             | divisions over excluded divisions when player has multiple registrations. |
+ * |         |             | Added comprehensive NAME_MATCHING debug logging with character-code      |
+ * |         |             | analysis and DUPLICATE_REG detection.                                     |
  * | 2.0     | 2026-01-15  | [Baseline] Official foundation for AI-integrated lineage.                 |
  * | 1.0     | 2026-01-19  | Core sync and logging baseline (UI exposes Update Draft Stats only).      |
  * +---------+-------------+---------------------------------------------------------------------------+
@@ -36,6 +42,44 @@
  * | Registrations         | Special Player Request| Special Player Requests                           |
  * | Challenge             | Team Name             | Challenge                                         |
  * +-----------------------+-----------------------+---------------------------------------------------+
+ *
+ * +-------------------------------------------------------------------------------------------------+
+ * |                              WORKFLOW & MATCHING LOGIC                                            |
+ * +-------------------------------------------------------------------------------------------------+
+ * PLAYER MATCHING:
+ * The script matches players between Registrations and Draft_Stats using exact name matching:
+ * - Concatenates "Player First Name" + " " + "Player Last Name" from both sheets
+ * - Case-sensitive exact string match ("John Doe" ≠ "Jon Doe")
+ * - Whitespace sensitive (leading/trailing spaces or double spaces cause match failures)
+ *
+ * UPDATE WORKFLOW:
+ * 1. Read Registrations (starting row 7) and Challenge sheets into lookup maps
+ * 2. For each existing player in Draft_Stats:
+ *    a. Match by full name to Registrations
+ *    b. If matched AND in draft-eligible division → Update Birth Date, Draft, Special Requests
+ *    c. If matched BUT in excluded division (Tee Ball, Rookie, etc.) → Clear those fields
+ *    d. If NOT matched → Clear automated fields (player unregistered)
+ * 3. Append new players found only in Registrations (not in excluded divisions)
+ *
+ * EXCLUDED DIVISIONS:
+ * Players in these divisions are cleared from the draft board:
+ * - Rookie (Coach Pitch), Tee Ball, Evaluation, Junior
+ *
+ * COUNTING METHODOLOGY:
+ * - Unique players only: Multiple rows per player (multi-season history) count as ONE player
+ * - Already Updated: Players with Birth Date AND Draft already populated before sync
+ * - Updated: Players matched but missing Birth Date OR Draft (newly populated)
+ * - Cleared: Players not in current Registrations (fields wiped)
+ * - Added: Brand new players appended to bottom of Draft_Stats
+ * - NOT Updated: Players in Registrations but not matched/updated in Draft_Stats
+ *
+ * COMMON MATCH FAILURES:
+ * - Name spelling variations ("Jon" vs "John", "Mary-Jane" vs "Mary Jane")
+ * - Extra/missing spaces ("John  Doe" with double space)
+ * - Nicknames ("Johnny" vs "John")
+ * - Middle names or suffixes ("John Michael Doe" vs "John Doe")
+ * - Special characters ("O'Brien" vs "OBrien")
+ * +-------------------------------------------------------------------------------------------------+
  */
 
 // TO ACTIVATE THIS FILE, REMOVE THE FORWARD SLASH AND ASTERISK ABOVE AND AT THE VERY BOTTOM
@@ -92,7 +136,10 @@ const NEG_COACH_KEYWORDS = [
 ];
 
 /**
- * DEBUG CONFIGURATION
+// ============================================================================
+// DEBUG CONFIGURATION
+// ============================================================================
+/**    
  * Enable/disable debug logging per feature. All debug logs go to a single "Debug_Log" sheet.
  * Set any flag to true to enable detailed logging for that feature.
  */
@@ -101,6 +148,7 @@ const DEBUG_FLAGS = {
   SCOUTING_ASSISTANT: false,
   DRAFT_INSIGHTS: false,
   CORE_SYNC: false,
+  NAME_MATCHING: true, // Enable to debug name matching issues
 };
 
 // ============================================================================
@@ -139,6 +187,8 @@ function onOpen() {
  * - Clears data for players no longer in the registration system or
  *   in non-draft (excluded) divisions.
  * - Appends new players that appear only in Registrations.
+ * - Tracks Already Updated, Updated, Cleared, Added, and NOT Updated categories.
+ * - Ensures unique player counting (multiple season rows = 1 player).
  */
 function updateStatsFromRegistrations() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -157,10 +207,11 @@ function updateStatsFromRegistrations() {
       .setBackground("#f3f3f3");
   }
 
-  // Counters for summary logging
-  let uniqueUpdated = new Set();
-  let uniqueCleared = new Set();
-  let newPlayerCount = 0;
+  // Enhanced counters for improved tracking
+  let uniqueAlreadyUpdated = new Set(); // Players already having Birth Date AND Draft populated
+  let uniqueUpdated = new Set();         // Players matched and newly updated (were missing data)
+  let uniqueCleared = new Set();         // Players removed from registrations
+  let newPlayerCount = 0;                // Brand new players added to bottom
 
   try {
     // 2) Basic sheet existence validation
@@ -196,14 +247,54 @@ function updateStatsFromRegistrations() {
       )
       .getValues();
     regData.forEach((row) => {
-      const name =
-        `${row[regMap["player first name"]]} ${row[regMap["player last name"]]}`.trim();
+      const firstName = row[regMap["player first name"]];
+      const lastName = row[regMap["player last name"]];
+      const name = `${firstName} ${lastName}`.trim();
+      
+      if (DEBUG_FLAGS.NAME_MATCHING) {
+        logDebug("Name Matching", "REG_NAME_BUILD", {
+          firstName: firstName,
+          lastName: lastName,
+          fullName: name,
+          firstNameLength: String(firstName).length,
+          lastNameLength: String(lastName).length,
+          fullNameLength: name.length,
+          charCodes: name.split('').map(c => c.charCodeAt(0)).slice(0, 20)
+        });
+      }
+      
       if (name && name !== "undefined undefined") {
-        registrationsMap.set(name, {
+        const newReg = {
           birth: row[regMap["player birth date"]],
           div: row[regMap["division name"]],
           spec: row[regMap["special player request"]],
-        });
+        };
+        
+        // Handle duplicate registrations: prioritize draft-eligible divisions over excluded divisions
+        if (registrationsMap.has(name)) {
+          const existingReg = registrationsMap.get(name);
+          const existingIsExcluded = isExcludedDiv(existingReg.div);
+          const newIsExcluded = isExcludedDiv(newReg.div);
+          
+          if (DEBUG_FLAGS.NAME_MATCHING) {
+            logDebug("Name Matching", "DUPLICATE_REG", {
+              playerName: name,
+              existingDiv: existingReg.div,
+              existingIsExcluded: existingIsExcluded,
+              newDiv: newReg.div,
+              newIsExcluded: newIsExcluded,
+              decision: (newIsExcluded && !existingIsExcluded) ? "KEEP_EXISTING_DRAFT_ELIGIBLE" : "OVERWRITE_WITH_NEW"
+            });
+          }
+          
+          // If new division is excluded but existing is draft-eligible, keep existing
+          if (newIsExcluded && !existingIsExcluded) {
+            return; // Don't overwrite - keep the draft-eligible registration
+          }
+          // Otherwise overwrite (handles: both excluded, both eligible, or new is eligible)
+        }
+        
+        registrationsMap.set(name, newReg);
       }
     });
 
@@ -226,13 +317,54 @@ function updateStatsFromRegistrations() {
     const existingPlayersInDraftStats = new Set();
 
     const finalValues = statsValues.map((row) => {
-      const name =
-        `${row[statsMap["player first name"]]} ${row[statsMap["player last name"]]}`.trim();
+      const firstName = row[statsMap["player first name"]];
+      const lastName = row[statsMap["player last name"]];
+      const name = `${firstName} ${lastName}`.trim();
+      
       if (!name || name === "undefined undefined") return row;
 
       existingPlayersInDraftStats.add(name);
+      
+      if (DEBUG_FLAGS.NAME_MATCHING && (name.includes("Lucas Thomas") || name.includes("Vincent Picone") || name.includes("Lucas Caya"))) {
+        logDebug("Name Matching", "DRAFT_NAME_CHECK", {
+          draftName: name,
+          firstName: firstName,
+          lastName: lastName,
+          nameLength: name.length,
+          charCodes: name.split('').map(c => c.charCodeAt(0)),
+          foundInReg: registrationsMap.has(name),
+          currentBirth: row[statsMap["player birth date"]],
+          currentDraft: row[statsMap["draft"]],
+          regMapKeys: Array.from(registrationsMap.keys()).filter(k => k.includes("Lucas") || k.includes("Vincent"))
+        });
+      }
 
       if (registrationsMap.has(name)) {
+        // DEBUG: Log complete update flow for problem players
+        if (DEBUG_FLAGS.NAME_MATCHING && (name.includes("Lucas Thomas") || name.includes("Vincent Picone") || name.includes("Lucas Caya"))) {
+          const reg = registrationsMap.get(name);
+          const excluded = isExcludedDiv(reg.div);
+          const newBirth = excluded ? "" : reg.birth;
+          const newDraft = excluded ? "" : shortenDiv(reg.div);
+          const hadBirthAndDraft = row[statsMap["player birth date"]] && row[statsMap["draft"]];
+          const hasChanges = String(row[statsMap["player birth date"]]) !== String(newBirth) || String(row[statsMap["draft"]]) !== String(newDraft);
+          
+          logDebug("Name Matching", "UPDATE_FLOW", {
+            playerName: name,
+            fromReg: { birth: reg.birth, div: reg.div, spec: reg.spec },
+            isExcluded: excluded,
+            calculated: { newBirth: newBirth, newDraft: newDraft },
+            currentInDraft: { birth: row[statsMap["player birth date"]], draft: row[statsMap["draft"]] },
+            stringCompare: { 
+              birth: `'${String(row[statsMap["player birth date"]])}' vs '${String(newBirth)}'`,
+              draft: `'${String(row[statsMap["draft"]])}' vs '${String(newDraft)}'`
+            },
+            hadBirthAndDraft: hadBirthAndDraft,
+            hasChanges: hasChanges,
+            willBeUpdated: hasChanges,
+            category: hadBirthAndDraft ? "Already Updated" : "Updated"
+          });
+        }
         const reg = registrationsMap.get(name);
         const excluded = isExcludedDiv(reg.div);
 
@@ -242,6 +374,10 @@ function updateStatsFromRegistrations() {
         const team = challengeMap.get(name);
         const newChal =
           team && team !== "Unallocated" ? team : row[statsMap["challenge"]];
+
+        // Check if Birth Date AND Draft were already populated ("Already Updated")
+        const hadBirthAndDraft = 
+          row[statsMap["player birth date"]] && row[statsMap["draft"]];
 
         const hasChanges =
           String(row[statsMap["player birth date"]]) !== String(newBirth) ||
@@ -255,9 +391,19 @@ function updateStatsFromRegistrations() {
           row[statsMap["draft"]] = newDraft;
           row[statsMap["special player requests"]] = newSpec;
           row[statsMap["challenge"]] = newChal;
-          uniqueUpdated.add(name);
+          
+          // Categorize: Already Updated vs newly Updated
+          if (hadBirthAndDraft) {
+            uniqueAlreadyUpdated.add(name);
+          } else {
+            uniqueUpdated.add(name);
+          }
+        } else if (hadBirthAndDraft) {
+          // No changes but data was already complete
+          uniqueAlreadyUpdated.add(name);
         }
       } else {
+        // Player not in Registrations - clear their data
         const hasData =
           row[statsMap["player birth date"]] ||
           row[statsMap["draft"]] ||
@@ -280,6 +426,17 @@ function updateStatsFromRegistrations() {
     // 6) Append new players that are only in Registrations
     const newRows = [];
     registrationsMap.forEach((reg, name) => {
+      // DEBUG: Log ADD flow for problem players
+      if (DEBUG_FLAGS.NAME_MATCHING && (name.includes("Lucas Thomas") || name.includes("Vincent Picone") || name.includes("Lucas Caya"))) {
+        logDebug("Name Matching", "ADD_FLOW", {
+          playerName: name,
+          existsInDraftStats: existingPlayersInDraftStats.has(name),
+          isExcluded: isExcludedDiv(reg.div),
+          willBeAdded: !existingPlayersInDraftStats.has(name) && !isExcludedDiv(reg.div),
+          regData: { birth: reg.birth, div: reg.div, spec: reg.spec }
+        });
+      }
+      
       if (!existingPlayersInDraftStats.has(name) && !isExcludedDiv(reg.div)) {
         const parts = name.split(" ");
         const newRow = new Array(statsHeaders.length).fill("");
@@ -307,22 +464,72 @@ function updateStatsFromRegistrations() {
         .setValues(newRows);
     }
 
-    // 7) Log summary and show user notification
-    const totalProcessed =
-      uniqueUpdated.size + uniqueCleared.size + newPlayerCount;
+    // 7) VERIFICATION CHECK: Calculate NOT Updated players
+    // Re-read Draft_Stats to get the post-update state
+    const verifyRange = statsSheet.getRange(
+      2,
+      1,
+      Math.max(statsSheet.getLastRow() - 1, 1),
+      statsSheet.getLastColumn(),
+    );
+    const verifyValues = verifyRange.getValues();
+    const playersNotUpdated = new Set();
+
+    registrationsMap.forEach((reg, regName) => {
+      if (isExcludedDiv(reg.div)) return; // Skip excluded divisions
+      
+      let foundAndUpdated = false;
+      verifyValues.forEach((row) => {
+        const draftName =
+          `${row[statsMap["player first name"]]} ${row[statsMap["player last name"]]}`.trim();
+        if (draftName === regName) {
+          // Check if this player has Birth Date AND Draft populated
+          const hasBirth = row[statsMap["player birth date"]];
+          const hasDraft = row[statsMap["draft"]];
+          if (hasBirth && hasDraft) {
+            foundAndUpdated = true;
+          }
+        }
+      });
+      
+      if (!foundAndUpdated) {
+        playersNotUpdated.add(regName);
+      }
+    });
+
+    // 8) Calculate totals and verify accounting
+    // Count only non-excluded division players for "Total Registered"
+    let totalDraftEligiblePlayers = 0;
+    let totalExcludedPlayers = 0;
+    registrationsMap.forEach((reg, name) => {
+      if (isExcludedDiv(reg.div)) {
+        totalExcludedPlayers++;
+      } else {
+        totalDraftEligiblePlayers++;
+      }
+    });
+
     const summaryData =
-      `Total Players Processed: (${totalProcessed}) --- ` +
-      `Players Updated (existing players): (${uniqueUpdated.size}) --- ` +
-      `Players Cleared (unregistered): (${uniqueCleared.size}) --- ` +
-      `Players Added (new players): (${newPlayerCount})`;
+      `Total Registered Players (draft-eligible): (${totalDraftEligiblePlayers}) --- ` +
+      `Excluded (non-draft divisions): (${totalExcludedPlayers}) --- ` +
+      `Already Updated (existing): (${uniqueAlreadyUpdated.size}) --- ` +
+      `Updated (existing): (${uniqueUpdated.size}) --- ` +
+      `Cleared (unregistered): (${uniqueCleared.size}) --- ` +
+      `Added (new): (${newPlayerCount}) --- ` +
+      `NOT Updated: (${playersNotUpdated.size})`;
 
     logSheet.appendRow([new Date(), "Script", "✅ Success", summaryData]);
 
+    // 9) Build user-friendly popup message
     const popupRows = [
-      ["Total Players Processed:", totalProcessed],
+      ["Total Registered Players (draft-eligible):", totalDraftEligiblePlayers],
+      ["Players Already Updated (existing players):", uniqueAlreadyUpdated.size],
       ["Players Updated (existing players):", uniqueUpdated.size],
       ["Players Cleared (unregistered):", uniqueCleared.size],
       ["Players Added (new players):", newPlayerCount],
+      ["Players NOT Updated:", playersNotUpdated.size],
+      ["", ""], // Blank line for separation
+      ["Players in Excluded Divisions:", totalExcludedPlayers],
     ];
     const maxLabelLen = popupRows.reduce(
       (max, [label]) => Math.max(max, label.length),
@@ -332,7 +539,24 @@ function updateStatsFromRegistrations() {
       .map(([label, value]) => label.padEnd(maxLabelLen + 2) + value)
       .join("\n");
 
-    SpreadsheetApp.getUi().alert(popupText);
+    let alertMessage = popupText;
+    if (playersNotUpdated.size > 0) {
+      alertMessage +=
+        "\n\n⚠️ WARNING: Some registered players were NOT updated.\n" +
+        "This may be due to name mismatches (spelling, spacing, nicknames).\n" +
+        "Use your Sanity Checker to identify these players.";
+    }
+    
+    // Add accounting verification note
+    const accountedFor = uniqueAlreadyUpdated.size + uniqueUpdated.size + newPlayerCount + playersNotUpdated.size;
+    if (accountedFor !== totalDraftEligiblePlayers) {
+      alertMessage +=
+        `\n\n⚠️ ACCOUNTING NOTE: Draft-eligible players (${totalDraftEligiblePlayers}) = ` +
+        `Already Updated (${uniqueAlreadyUpdated.size}) + Updated (${uniqueUpdated.size}) + ` +
+        `Added (${newPlayerCount}) + NOT Updated (${playersNotUpdated.size}) = ${accountedFor}`;
+    }
+
+    SpreadsheetApp.getUi().alert(alertMessage);
   } catch (e) {
     logSheet.appendRow([new Date(), "Script", "❌ Failed", e.message]);
     SpreadsheetApp.getUi().alert("❌ Sync Error\n\n" + e.message);
