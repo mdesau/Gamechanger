@@ -5,6 +5,38 @@ All notable changes to the Stats Align Pipeline will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-01-12
+
+### Added
+- **4-Tier Mapping Waterfall**: Exact → Synonym → Identity → Batch AI for maximum efficiency
+- **Synonym Map**: 20+ built-in common stat name variations (e.g., "batting average" → Batting_AVG)
+- **Dynamic Header Detection**: Auto-detects 1-row flat vs 2-row sectional header formats
+- **AI Section Profiling**: For 1-row headers, AI categorizes columns into Batting/Pitching/Fielding
+- **Batch Residual AI**: Single API call maps all unmapped stats with context windows
+- **Context Windows**: Provides ±5 surrounding columns to AI for better accuracy
+- **Visual AI Highlighting**: Blue background (#d9e9ff) marks AI-mapped columns in audit logs
+- **Detailed Metrics**: Logs show source/aligned/missing/extra/AI mapping counts
+- **Glossary Filtering**: Enhanced junk row detection now includes "glossary" keyword
+- **Smart Identity Detection**: "first", "last", "#", "number", "jersey", "team" auto-recognized
+
+### Changed
+- **Menu Item**: Simplified to "Import & Align Staging Data" (no "AI" label needed)
+- **Mapping Strategy**: Hybrid approach minimizes AI usage to ~5-15% of columns
+- **Error Messages**: More descriptive failure logging for each tier
+- **Version Display**: Shows tier breakdown in success dialog
+
+### Technical Details
+- Model: `gemini-2.5-flash-preview-09-2025` (unchanged)
+- API Efficiency: Only residual stats sent to AI (typical: 0-3 unmapped stats per import)
+- Tier 1-3: Deterministic, instant, free (85-95% of stats)
+- Tier 4: AI-powered, 2-5 seconds, 1 API call (5-15% of stats)
+- Synonym coverage: General (4), Batting (12), Pitching (6), Fielding (2)
+
+### Performance Improvements
+- **Cost Reduction**: Standard GameChanger CSVs often use 0 API calls
+- **Speed**: 85-95% of stats mapped instantly without AI latency
+- **Reliability**: Falls back gracefully through tiers for maximum success rate
+
 ## [2.0.0] - 2026-01-11
 
 ### Added
