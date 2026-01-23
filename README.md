@@ -1,6 +1,7 @@
-# Gamechanger - Youth Baseball League Management Tools
+# Gamechanger Stats Automation for Youth Baseball Drafts - Youth Baseball League Management Tools
 
-A collection of Google Apps Script tools for automating youth baseball league administration tasks.
+A collection of Google Apps Script tools for automating youth baseball league administration tasks such as building draft stats for coaches, and identifying special player requests during registration.
+Our league specifically uses Gamechanger for scoring (stats) and SportsConnect for registration. 
 
 ## 📁 Repository Structure
 
@@ -25,15 +26,16 @@ Gamechanger/
 
 ## 🛠️ Tools Overview
 
-| Tool | Version | Description | AI-Powered |
-|------|---------|-------------|------------|
+| Tool | Latest Version | Description | AI-Powered |
+|------|----------------|-------------|------------|
 | [**Special Requests**](special-requests/) | v1.0 | AI sentiment analysis for parent requests - detects negative coach mentions and division change requests | ✅ Yes (Gemini) |
-| [**AutoUpdate Regs**](autoupdate-regs/) | v2.0 | Automated registration-to-stats data synchronization | ❌ No |
-| [**Stats Align Pipeline**](stats-align/) | TBD | Player statistics processing and alignment | ❌ No |
+| [**AutoUpdate Regs**](autoupdate-regs/) | v2.0 | Automated registration-to-stats data synchronization |  ✅ Yes (Gemini) |
+| [**Stats Align Pipeline**](stats-align/) | TBD | Player statistics processing and alignment | ✅ Yes (Gemini) |
 
 ## 🚀 Quick Start
 
-Each tool is self-contained with its own installation instructions. Click the tool name above or navigate to the respective folder to get started.
+Each tool is self-contained with its own installation instructions but all contribute to various phases of aggregating coaches stats, building draft stats sheets for coaches, and identifying special player requests. 
+Click the tool name above or navigate to the respective folder to get started.
 
 ### Prerequisites
 - Google Sheets account
