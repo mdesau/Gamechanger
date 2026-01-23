@@ -5,6 +5,34 @@ All notable changes to the Stats Align Pipeline will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-01-11
+
+### Added
+- **AI-Powered Header Mapping**: Gemini 2.5 Flash Preview integration for intelligent stat name matching
+- **Context-Aware Section Detection**: AI understands Batting/Pitching/Fielding context for accurate mapping
+- **JSON Mode API**: Structured AI responses using Gemini's JSON mode for reliable parsing
+- **Varied Naming Convention Support**: Handles league-specific stat names (e.g., "Batting Average" → "Batting_AVG")
+- **AI Identity Detection**: Intelligent mapping of "#", "Number", "First", "Last" variations
+- **Single-Prompt Mapping**: Efficient AI call maps all headers in one request
+- **Gemini API Configuration**: Script Properties support for GEMINI_API_KEY
+
+### Changed
+- **Menu Item**: Updated to "Align & Import Staging Data (AI)" to indicate AI processing
+- **Version String**: Now includes AI designation in logs
+- **Error Messages**: Enhanced to include AI-specific failures ("No player data aligned by AI")
+- **Mapping Logic**: Replaced direct string matching with AI-powered contextual mapping
+
+### Technical Details
+- Model: `gemini-2.5-flash-preview-09-2025`
+- API Mode: JSON-formatted responses
+- Prompt Engineering: Single-prompt with master/incoming key lists and mapping rules
+- Identity Rules: AI instructions for handling common identity column variations
+- Context Rules: Section-aware mapping (e.g., "AVG" in Batting vs Pitching)
+
+### Removed
+- Direct string concatenation matching (replaced by AI)
+- Hard-coded identity detection logic (now AI-powered)
+
 ## [1.0.0] - 2026-01-11
 
 ### Added
