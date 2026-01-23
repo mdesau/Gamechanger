@@ -30,10 +30,14 @@
  * | [GenAI]  Draft Insights: Automated draft board summaries and top-talent identification.           |
  * | [GenAI]  Negative Flagging: AI sentiment analysis of "Avoid Coach" requests with RED highlights.  |
  * | [Core]   Data Synchronization: Automatic updates from Registrations/Challenge to Draft_Stats.     |
+ * | [Core]   Duplicate Registration Handling: Prioritizes draft-eligible over excluded divisions.     |
+ * | [Core]   Enhanced Sync Accounting: Tracks Already Updated, Updated, Added, Cleared, NOT Updated.  |
+ * | [Core]   Sanity Checker: Bi-directional validation finds missing players & orphaned records.      |
  * | [Core]   New Player Addition: Automatically appends unregistered players to the bottom of board.  |
  * | [Core]   Cleanup: Clears automated data for players no longer in the registration system.         |
  * | [Core]   Custom Menus: Integrated Google Sheets UI buttons for manual trigger.                    |
  * | [Core]   Logging: Persistent 'Automation Log' tracking with Success/Failed status icons.          |
+ * | [Core]   Debug Logging: NAME_MATCHING flag with character-code analysis and DUPLICATE_REG trace.  |
  * +---------------------------------------------------------------------------------------------------+
  * * +-------------------------------------------------------------------------------------------------+
  * |                                   DATA MAPPING REFERENCE                                          |
