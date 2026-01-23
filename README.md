@@ -75,7 +75,7 @@ Click the tool name above or navigate to the respective folder to get started.
 - Registration-to-stats synchronization
 - Error handling and logging
 
-**Best For**: Leagues needing consistent data across registration and statistics systems.
+**Best For**: Leagues using GC Stats
 
 [→ Full Documentation](autoupdate-regs/README.md)
 
