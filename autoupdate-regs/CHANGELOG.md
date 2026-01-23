@@ -5,6 +5,23 @@ All notable changes to the AutoUpdate Regs to Stats tool will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-01-23
+
+### Added
+- **Sanity Checker**: New "Run Sanity Checker" menu option for bi-directional data validation
+  - **Check 1 (Forward)**: Finds draft-eligible players in Registration NOT in Draft_Stats
+  - **Check 2 (Reverse)**: Finds players with Birth Date + Draft in Draft_Stats NOT in current Registration
+  - Auto-generates "Sanity_Check_Results" sheet with color-coded issues
+  - Red highlights for missing players (possible name mismatches)
+  - Yellow highlights for orphaned records (not in current registration)
+  - Green confirmation when no issues found
+  - Timestamped summary with total counts and recommendations
+- Integration with Automation Log for sanity check history tracking
+
+### Changed
+- Sanity Checker replaces existing report sheet on each run (single timestamped report)
+- Report sheet automatically becomes active after generation
+
 ## [2.1.0] - 2026-01-23
 
 ### Added
@@ -58,4 +75,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-**Git Tags**: Use `autoupdate-regs-v2.1`, `autoupdate-regs-v2.0`, `autoupdate-regs-v1.0` for version-specific references.
+**Git Tags**: Use `autoupdate-regs-v2.2`, `autoupdate-regs-v2.1`, `autoupdate-regs-v2.0`, `autoupdate-regs-v1.0` for version-specific references.

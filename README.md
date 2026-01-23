@@ -29,7 +29,7 @@ Gamechanger/
 | Tool | Latest Version | Description | AI-Powered |
 |------|----------------|-------------|------------|
 | [**Special Requests**](special-requests/) | v1.0 | AI sentiment analysis for parent requests - detects negative coach mentions and division change requests | ✅ Yes (Gemini) |
-| [**AutoUpdate Regs**](autoupdate-regs/) | v2.1 | Automated registration-to-stats data synchronization with duplicate registration handling |  ✅ Yes (Gemini) |
+| [**AutoUpdate Regs**](autoupdate-regs/) | v2.2 | Automated registration-to-stats data synchronization with duplicate handling and sanity checking |  ✅ Yes (Gemini) |
 | [**Stats Align Pipeline**](stats-align/) | TBD | Player statistics processing and alignment | ✅ Yes (Gemini) |
 
 ## 🚀 Quick Start
@@ -99,6 +99,7 @@ Each tool uses **independent semantic versioning** with Git tags:
 - `autoupdate-regs-v1.0` - AutoUpdate Regs v1.0
 - `autoupdate-regs-v2.0` - AutoUpdate Regs v2.0
 - `autoupdate-regs-v2.1` - AutoUpdate Regs v2.1
+- `autoupdate-regs-v2.2` - AutoUpdate Regs v2.2
 
 This allows you to:
 - Track each tool's version history independently

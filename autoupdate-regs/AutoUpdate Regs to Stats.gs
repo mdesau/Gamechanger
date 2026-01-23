@@ -5,12 +5,15 @@
  * preparations. It automates the complex task of matching registration records,
  * performance stats, and challenge assignments.
  *
- * CURRENT VERSION: 2.1
+ * CURRENT VERSION: 2.2
  * +---------------------------------------------------------------------------------------------------+
  * |                                      CHANGE LOG                                                   |
  * +---------+-------------+---------------------------------------------------------------------------+
  * | VERSION | DATE        | DESCRIPTION                                                               |
  * +---------+-------------+---------------------------------------------------------------------------+
+ * | 2.2     | 2026-01-23  | Added Sanity Checker: Bi-directional validation between Registration     |
+ * |         |             | and Draft_Stats. Identifies orphaned records, missing players, and       |
+ * |         |             | generates timestamped report in "Sanity_Check_Results" sheet.            |
  * | 2.1     | 2026-01-23  | Enhanced sync accounting: Added "Already Updated" vs "Updated" tracking, |
  * |         |             | "NOT Updated" verification check, improved UI messaging, workflow docs.   |
  * |         |             | Fixed duplicate registration handling: prioritizes draft-eligible         |
@@ -171,6 +174,7 @@ function onOpen() {
 
   ui.createMenu("Gamechanger")
     .addItem("Update Draft Stats", "updateStatsFromRegistrations")
+    .addItem("Run Sanity Checker", "runSanityChecker")
     .addSeparator()
     .addSubMenu(aiToolsMenu)
     .addToUi();
@@ -561,6 +565,245 @@ function updateStatsFromRegistrations() {
     logSheet.appendRow([new Date(), "Script", "❌ Failed", e.message]);
     SpreadsheetApp.getUi().alert("❌ Sync Error\n\n" + e.message);
   }
+}
+
+// ============================================================================
+// SANITY CHECKER - BI-DIRECTIONAL VALIDATION
+// ============================================================================
+
+/**
+ * Runs bi-directional validation between Registration and Draft_Stats.
+ * Identifies orphaned records and missing players, generates timestamped report.
+ *
+ * Check 1: Registration → Draft_Stats (Forward)
+ *   - Finds draft-eligible players in Registration NOT in Draft_Stats
+ *   - Should be 0 after successful sync (indicates name mismatch issues)
+ *
+ * Check 2: Draft_Stats → Registration (Reverse)
+ *   - Finds players with Birth Date AND Draft in Draft_Stats NOT in current Registration
+ *   - Flags orphaned records from previous seasons or manual entries
+ */
+function runSanityChecker() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const statsSheet = ss.getSheetByName("Draft_Stats");
+  const regSheet = ss.getSheetByName("Registrations");
+
+  if (!statsSheet || !regSheet) {
+    ui.alert("❌ Error", "Required sheets (Draft_Stats or Registrations) are missing.", ui.ButtonSet.OK);
+    return;
+  }
+
+  // Build header maps
+  const statsHeaders = statsSheet.getRange(1, 1, 1, statsSheet.getLastColumn()).getValues()[0];
+  const regHeaders = regSheet.getRange(6, 1, 1, regSheet.getLastColumn()).getValues()[0];
+  const statsMap = getMap(statsHeaders);
+  const regMap = getMap(regHeaders);
+
+  // Build Registration lookup map (draft-eligible only)
+  const registrationsMap = new Map();
+  const regData = regSheet.getRange(7, 1, Math.max(regSheet.getLastRow() - 6, 1), regSheet.getLastColumn()).getValues();
+  
+  regData.forEach((row) => {
+    const firstName = row[regMap["player first name"]];
+    const lastName = row[regMap["player last name"]];
+    const name = `${firstName} ${lastName}`.trim();
+    const div = row[regMap["division name"]];
+    
+    if (name && name !== "undefined undefined" && !isExcludedDiv(div)) {
+      const newReg = {
+        birth: row[regMap["player birth date"]],
+        div: div,
+        spec: row[regMap["special player request"]],
+      };
+      
+      // Use same duplicate handling logic as main sync
+      if (registrationsMap.has(name)) {
+        const existingReg = registrationsMap.get(name);
+        const existingIsExcluded = isExcludedDiv(existingReg.div);
+        const newIsExcluded = isExcludedDiv(newReg.div);
+        if (newIsExcluded && !existingIsExcluded) {
+          return; // Keep existing draft-eligible registration
+        }
+      }
+      registrationsMap.set(name, newReg);
+    }
+  });
+
+  // Build Draft_Stats lookup map (players with Birth Date AND Draft populated)
+  const draftStatsMap = new Map();
+  const statsData = statsSheet.getRange(2, 1, Math.max(statsSheet.getLastRow() - 1, 1), statsSheet.getLastColumn()).getValues();
+  
+  statsData.forEach((row) => {
+    const firstName = row[statsMap["player first name"]];
+    const lastName = row[statsMap["player last name"]];
+    const name = `${firstName} ${lastName}`.trim();
+    const birth = row[statsMap["player birth date"]];
+    const draft = row[statsMap["draft"]];
+    
+    if (name && name !== "undefined undefined" && birth && draft) {
+      draftStatsMap.set(name, {
+        birth: birth,
+        draft: draft,
+        spec: row[statsMap["special player requests"]],
+      });
+    }
+  });
+
+  // CHECK 1: Registration → Draft_Stats (Forward)
+  // Find draft-eligible players in Registration NOT in Draft_Stats
+  const missingFromDraftStats = [];
+  registrationsMap.forEach((reg, name) => {
+    if (!draftStatsMap.has(name)) {
+      missingFromDraftStats.push({
+        issueType: "Missing from Draft_Stats",
+        sourceName: name,
+        birthDate: reg.birth,
+        division: reg.div,
+        specialRequest: reg.spec,
+        action: "Possible name mismatch - check spelling",
+      });
+    }
+  });
+
+  // CHECK 2: Draft_Stats → Registration (Reverse)
+  // Find players with Birth Date AND Draft in Draft_Stats NOT in current Registration
+  const orphanedInDraftStats = [];
+  draftStatsMap.forEach((draft, name) => {
+    if (!registrationsMap.has(name)) {
+      orphanedInDraftStats.push({
+        issueType: "Orphaned in Draft_Stats",
+        sourceName: name,
+        birthDate: draft.birth,
+        division: draft.draft,
+        specialRequest: draft.spec,
+        action: "Not in current registration - verify or remove",
+      });
+    }
+  });
+
+  // Generate report sheet
+  const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd_HH-mm-ss");
+  const reportSheetName = `Sanity_Check_Results`;
+  
+  // Delete existing report sheet if it exists
+  let reportSheet = ss.getSheetByName(reportSheetName);
+  if (reportSheet) {
+    ss.deleteSheet(reportSheet);
+  }
+  reportSheet = ss.insertSheet(reportSheetName);
+
+  // Set up headers
+  const headers = ["Issue Type", "Player Name", "Birth Date", "Division", "Special Request", "Recommended Action"];
+  reportSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  reportSheet.getRange(1, 1, 1, headers.length)
+    .setFontWeight("bold")
+    .setBackground("#2c5aa0")
+    .setFontColor("#ffffff");
+
+  // Add timestamp and summary
+  reportSheet.getRange("A2").setValue(`Report Generated: ${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MMM dd, yyyy HH:mm:ss")}`);
+  reportSheet.getRange("A3").setValue(`Total Draft-Eligible in Registration: ${registrationsMap.size}`);
+  reportSheet.getRange("A4").setValue(`Total Populated in Draft_Stats: ${draftStatsMap.size}`);
+  reportSheet.getRange("A5").setValue(`Issues Found: ${missingFromDraftStats.length + orphanedInDraftStats.length}`);
+  
+  // Format summary section
+  reportSheet.getRange("A2:A5").setFontWeight("bold").setBackground("#f3f3f3");
+
+  let currentRow = 7;
+
+  // Add Check 1 results
+  if (missingFromDraftStats.length > 0) {
+    reportSheet.getRange(currentRow, 1).setValue(`🔴 CHECK 1: Missing from Draft_Stats (${missingFromDraftStats.length})`);
+    reportSheet.getRange(currentRow, 1, 1, headers.length).mergeAcross().setBackground("#ea9999").setFontWeight("bold");
+    currentRow++;
+    
+    missingFromDraftStats.forEach((issue) => {
+      reportSheet.getRange(currentRow, 1, 1, 6).setValues([[
+        issue.issueType,
+        issue.sourceName,
+        issue.birthDate,
+        issue.division,
+        issue.specialRequest || "",
+        issue.action,
+      ]]);
+      reportSheet.getRange(currentRow, 1, 1, headers.length).setBackground("#f4c7c3");
+      currentRow++;
+    });
+    currentRow++;
+  } else {
+    reportSheet.getRange(currentRow, 1).setValue(`✅ CHECK 1: All draft-eligible players found in Draft_Stats`);
+    reportSheet.getRange(currentRow, 1, 1, headers.length).mergeAcross().setBackground("#d9ead3").setFontWeight("bold");
+    currentRow += 2;
+  }
+
+  // Add Check 2 results
+  if (orphanedInDraftStats.length > 0) {
+    reportSheet.getRange(currentRow, 1).setValue(`🟡 CHECK 2: Orphaned in Draft_Stats (${orphanedInDraftStats.length})`);
+    reportSheet.getRange(currentRow, 1, 1, headers.length).mergeAcross().setBackground("#ffd966").setFontWeight("bold");
+    currentRow++;
+    
+    orphanedInDraftStats.forEach((issue) => {
+      reportSheet.getRange(currentRow, 1, 1, 6).setValues([[
+        issue.issueType,
+        issue.sourceName,
+        issue.birthDate,
+        issue.division,
+        issue.specialRequest || "",
+        issue.action,
+      ]]);
+      reportSheet.getRange(currentRow, 1, 1, headers.length).setBackground("#fff2cc");
+      currentRow++;
+    });
+  } else {
+    reportSheet.getRange(currentRow, 1).setValue(`✅ CHECK 2: No orphaned records in Draft_Stats`);
+    reportSheet.getRange(currentRow, 1, 1, headers.length).mergeAcross().setBackground("#d9ead3").setFontWeight("bold");
+  }
+
+  // Auto-resize columns
+  for (let i = 1; i <= headers.length; i++) {
+    reportSheet.autoResizeColumn(i);
+  }
+
+  // Log to Automation Log
+  let logSheet = ss.getSheetByName(LOG_SHEET_NAME) || ss.insertSheet(LOG_SHEET_NAME);
+  if (logSheet.getLastRow() === 0) {
+    logSheet.appendRow(["Timestamp", "Source", "Status", "Comments"]);
+    logSheet.getRange(1, 1, 1, 4).setFontWeight("bold").setBackground("#f3f3f3");
+  }
+  
+  const logMessage = 
+    `Sanity Checker --- ` +
+    `Draft-eligible in Reg: (${registrationsMap.size}) --- ` +
+    `Populated in Draft_Stats: (${draftStatsMap.size}) --- ` +
+    `Missing from Draft_Stats: (${missingFromDraftStats.length}) --- ` +
+    `Orphaned in Draft_Stats: (${orphanedInDraftStats.length})`;
+  
+  logSheet.appendRow([new Date(), "Sanity Checker", "✅ Success", logMessage]);
+
+  // Show summary alert
+  const totalIssues = missingFromDraftStats.length + orphanedInDraftStats.length;
+  let alertMsg = `Sanity Check Complete\n\n`;
+  alertMsg += `Draft-Eligible in Registration: ${registrationsMap.size}\n`;
+  alertMsg += `Populated in Draft_Stats: ${draftStatsMap.size}\n\n`;
+  
+  if (totalIssues === 0) {
+    alertMsg += `✅ No issues found! All players accounted for.`;
+  } else {
+    alertMsg += `⚠️ Issues Found: ${totalIssues}\n`;
+    if (missingFromDraftStats.length > 0) {
+      alertMsg += `  🔴 Missing from Draft_Stats: ${missingFromDraftStats.length}\n`;
+    }
+    if (orphanedInDraftStats.length > 0) {
+      alertMsg += `  🟡 Orphaned in Draft_Stats: ${orphanedInDraftStats.length}\n`;
+    }
+    alertMsg += `\nSee "${reportSheetName}" sheet for details.`;
+  }
+  
+  ui.alert("Sanity Checker", alertMsg, ui.ButtonSet.OK);
+  
+  // Switch to report sheet
+  ss.setActiveSheet(reportSheet);
 }
 
 // =================================================================================
