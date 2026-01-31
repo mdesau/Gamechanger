@@ -5,6 +5,15 @@ All notable changes to the AutoUpdate Regs to Stats tool will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-01-31
+
+### Refactored
+- **Unified AI Infrastructure**: Implemented `GeminiClient` class to centralize all AI API interactions.
+  - Eliminated code duplication across Negative Coach, Scout Assistant, and Draft Insights tools.
+  - Centralized robust retry logic (exponential backoff) for better stability.
+  - Standardized JSON vs Text response parsing.
+  - Improved error handling and debugging consistency for AI agents.
+
 ## [2.2.0] - 2026-01-23
 
 ### Added

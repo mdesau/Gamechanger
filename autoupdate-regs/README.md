@@ -1,6 +1,6 @@
 # AutoUpdate Regs to Stats
 
-**Version 2.1** | AI-Powered Registration Synchronization for Youth Baseball Drafts
+**Version 2.3** | AI-Powered Registration Synchronization for Youth Baseball Drafts
 
 Automated synchronization of registration data to draft board statistics, with intelligent handling of duplicate registrations and comprehensive tracking.
 
@@ -15,6 +15,7 @@ This tool automatically syncs player registration information from your league's
 - ✅ **Smart duplicate handling** - prioritizes draft-eligible divisions over excluded divisions
 - ✅ **Challenge team integration** - syncs team assignments automatically
 - ✅ **Automatic cleanup** - clears data for unregistered players
+- ✅ **Sanity Checker (v2.2)** - Bi-directional validation finding ghosts and missing players
 
 ### Sync Accounting (v2.1)
 - 📊 **Already Updated** - Players with complete Birth Date + Draft data
@@ -27,6 +28,7 @@ This tool automatically syncs player registration information from your league's
 - 🤖 **AI Scouting Assistant** - Ask open-ended questions about your draft board
 - 🤖 **Negative Coach Request Scanner** - Detects parent requests to avoid specific coaches
 - 🤖 **Draft Insights** - Executive summaries of talent trends
+- 🏗️ **GeminiClient Infrastructure (v2.3)** - Robust, unified API handling with retry logic
 
 ### Debug & Logging
 - 🐛 **NAME_MATCHING debug mode** - Character-code analysis for troubleshooting name match failures
@@ -66,6 +68,14 @@ This tool automatically syncs player registration information from your league's
    - Already Updated / Updated / Added / Cleared / NOT Updated counts
    - Players in excluded divisions (Tee Ball, Rookie, Evaluation, Junior)
 3. Check **Automation Log** sheet for detailed execution history
+
+### Running the Sanity Checker (v2.2)
+
+1. Click **Gamechanger** menu → **Run Sanity Checker**
+2. The tool performs a bidirectional check:
+   - **Forward**: Registry -> Draft_Stats
+   - **Reverse**: Draft_Stats -> Registry
+3. A report sheet `Sanity_Check_Results` is generated with color-coded actions (Missing players/Orphaned records).
 
 ### Troubleshooting Name Matches
 
@@ -134,6 +144,8 @@ Players in these divisions are **NOT** synced to Draft_Stats:
 
 ## Version History
 
+- **v2.3** (2026-01-31) - AI Infrastructure Refactor (`GeminiClient`), code modernization
+- **v2.2** (2026-01-23) - Sanity Checker (bi-directional validation)
 - **v2.1** (2026-01-23) - Duplicate registration handling, enhanced accounting, debug logging
 - **v2.0** (2026-01-15) - AI integration (Scouting Assistant, Negative Coach Scanner)
 - **v1.0** (2026-01-19) - Core sync and logging baseline
