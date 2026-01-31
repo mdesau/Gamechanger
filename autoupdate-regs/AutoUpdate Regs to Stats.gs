@@ -31,6 +31,7 @@
  * +---------------------------------------------------------------------------------------------------+
  * | [GenAI]  Scout Assistant: On-demand player analysis and roster evaluation via Gemini 2.5.         |
  * | [GenAI]  Draft Insights: Automated draft board summaries and top-talent identification.           |
+ * | [GenAI]  Mock Draft: Simulation tool w/ Snake Draft logic based on historical season stats.       |
  * | [GenAI]  Negative Flagging: AI sentiment analysis of "Avoid Coach" requests with RED highlights.  |
  * | [Core]   Data Synchronization: Automatic updates from Registrations/Challenge to Draft_Stats.     |
  * | [Core]   Duplicate Registration Handling: Prioritizes draft-eligible over excluded divisions.     |
@@ -176,7 +177,8 @@ function onOpen() {
   const aiToolsMenu = ui
     .createMenu("AI Tools")
     .addItem("Negative Coach Request Assistant", "runNegativeCoachAssistant")
-    .addItem("Ask AI Scouting Assistant", "askGeminiAdHoc");
+    .addItem("Ask AI Scouting Assistant", "askGeminiAdHoc")
+    .addItem("Mock Draft Generator", "showMockDraftDialog");
     // .addItem("Draft Insights", "aiDraftSummary");
 
   ui.createMenu("Gamechanger")

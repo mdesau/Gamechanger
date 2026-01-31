@@ -98,6 +98,17 @@ If players show up as "NOT Updated":
    - "If our league prioritizes strong bats who can pitch, give me a list of the top 10 probable picks"
 3. Review AI analysis in the popup dialog
 
+### Using AI Mock Draft Generator (v2.4)
+
+1. Click **Gamechanger** → **AI Tools** → **Mock Draft Generator**
+2. **Select Division**: Choose the sheet (e.g., "Minors") containing historical data.
+3. **Select Season**: Tool auto-detects available seasons from that sheet.
+4. **Prioritize Stats**: Check relevant stats (e.g., `ERA`, `OBP`, `INN`).
+   - *Pro Tip*: The AI is tuned to prioritize "Two-Way Players" and Catchers (`INN` column).
+5. **Set Guidelines**: Add custom strategies (e.g., "Ensure balanced pitching").
+6. Click **Start Mock Draft**.
+7. A new sheet (e.g., `Minors Mock Draft`) is created with 10 teams drafted in snake order.
+
 ## How It Works
 
 ### Duplicate Registration Logic (v2.1 Fix)

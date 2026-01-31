@@ -1,0 +1,211 @@
+<!-- MockDraftDialog.html -->
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/add-ons1.css">
+    <style>
+      body { padding: 15px; font-family: 'Google Sans', Roboto, Arial, sans-serif; }
+      .step { display: none; margin-bottom: 20px; }
+      .step.active { display: block; }
+      .form-group { margin-bottom: 12px; }
+      label { font-weight: bold; display: block; margin-bottom: 5px; }
+      select, input[type="number"], textarea { width: 100%; padding: 8px; box-sizing: border-box; }
+      .checkbox-group { max-height: 150px; overflow-y: auto; border: 1px solid #ccc; padding: 5px; }
+      .checkbox-item { display: flex; align-items: center; margin-bottom: 4px; }
+      .checkbox-item input { margin-right: 8px; }
+      .buttons { margin-top: 20px; display: flex; justify-content: space-between; }
+      .summary-box { background: #f1f3f4; padding: 10px; border-radius: 4px; font-family: monospace; white-space: pre-wrap; }
+      .loading { color: #666; font-style: italic; }
+      .error { color: #d93025; margin-top: 10px; }
+    </style>
+  </head>
+  <body>
+    
+    <!-- STEP 1: Division Selection -->
+    <div id="step1" class="step active">
+      <div class="form-group">
+        <label for="division">1. Which Division would you like to mock draft?</label>
+        <select id="division" onchange="loadSeasons()">
+          <option value="" disabled selected>Select Division...</option>
+          <option value="IMP">IMP</option>
+          <option value="AMP">AMP</option>
+          <option value="Minors">Minors</option>
+          <option value="Majors">Majors</option>
+        </select>
+        <div id="season-loader" class="loading" style="display:none;">Looking up seasons...</div>
+      </div>
+      <div class="buttons">
+        <button class="action" onclick="goToStep2()" id="btn-step1" disabled>Next</button>
+      </div>
+    </div>
+
+    <!-- STEP 2: Season Selection -->
+    <div id="step2" class="step">
+      <div class="form-group">
+        <label for="season">2. Which Season's stats to use?</label>
+        <select id="season" onchange="loadStats()">
+          <option value="" disabled selected>Select Season...</option>
+          <!-- Populated by script -->
+        </select>
+         <div id="stats-loader" class="loading" style="display:none;">Fetching stat columns...</div>
+      </div>
+      <div class="buttons">
+        <button onclick="showStep('step1')">Back</button>
+        <button class="action" onclick="goToStep3()" id="btn-step2" disabled>Next</button>
+      </div>
+    </div>
+
+    <!-- STEP 3: Logic & Weights -->
+    <div id="step3" class="step">
+      <div class="form-group">
+        <label>3. Weighted Stats (Select to prioritize)</label>
+        <div id="stats-container" class="checkbox-group">
+          <!-- Populated by script -->
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="guidelines">Further Drafting Guidelines:</label>
+        <textarea id="guidelines" rows="3" placeholder="e.g. Ensure every team has at least 2 strong pitchers..."></textarea>
+      </div>
+      <div class="form-group">
+        <label for="teamCount">How many teams in your draft?</label>
+        <input type="number" id="teamCount" value="10" min="2" max="20">
+      </div>
+      <div class="buttons">
+        <button onclick="showStep('step2')">Back</button>
+        <button class="action" onclick="goToSummary()">Review Summary</button>
+      </div>
+    </div>
+
+    <!-- STEP 4: Summary -->
+    <div id="step4" class="step">
+      <h3>Review Configuration</h3>
+      <div id="summary-content" class="summary-box"></div>
+      <div id="execution-status" class="loading" style="margin-top:10px;"></div>
+      <div class="buttons">
+        <button onclick="showStep('step3')" id="btn-edit">Edit</button>
+        <button class="create" onclick="startMockDraft()" id="btn-start">Start Mock Draft</button>
+      </div>
+    </div>
+
+    <script>
+      let availableStats = [];
+
+      function showStep(stepId) {
+        document.querySelectorAll('.step').forEach(el => el.classList.remove('active'));
+        document.getElementById(stepId).classList.add('active');
+      }
+
+      function loadSeasons() {
+        const div = document.getElementById('division').value;
+        if (!div) return;
+        
+        document.getElementById('season-loader').style.display = 'block';
+        document.getElementById('btn-step1').disabled = true;
+        
+        google.script.run
+          .withSuccessHandler(seasons => {
+            const seasonSelect = document.getElementById('season');
+            seasonSelect.innerHTML = '<option value="" disabled selected>Select Season...</option>';
+            seasons.forEach(s => {
+              const opt = document.createElement('option');
+              opt.value = s;
+              opt.text = s;
+              seasonSelect.add(opt);
+            });
+            document.getElementById('season-loader').style.display = 'none';
+            document.getElementById('btn-step1').disabled = false;
+          })
+          .withFailureHandler(err => {
+             alert("Error loading seasons: " + err.message);
+             document.getElementById('season-loader').style.display = 'none';
+          })
+          .getDivisionSeasons(div);
+      }
+
+      function goToStep2() {
+        if (document.getElementById('division').value) showStep('step2');
+      }
+
+      function loadStats() {
+        const div = document.getElementById('division').value;
+        if (!div) return;
+        
+        document.getElementById('stats-loader').style.display = 'block';
+        document.getElementById('btn-step2').disabled = true;
+
+        google.script.run
+          .withSuccessHandler(stats => {
+            const container = document.getElementById('stats-container');
+            container.innerHTML = '';
+            stats.forEach(stat => {
+              // Basic check to filter out non-stats like Name/Season if possible, or just show all
+              const div = document.createElement('div');
+              div.className = 'checkbox-item';
+              div.innerHTML = `<input type="checkbox" name="stat_weight" value="${stat}"><label>${stat}</label>`;
+              container.appendChild(div);
+            });
+            document.getElementById('stats-loader').style.display = 'none';
+            document.getElementById('btn-step2').disabled = false;
+          })
+          .withFailureHandler(err => {
+            console.error(err);
+             // If failed, just allow proceed without stats
+             document.getElementById('stats-loader').style.display = 'none';
+             document.getElementById('btn-step2').disabled = false;
+          })
+          .getDivisionStatColumns(div);
+      }
+
+      function goToStep3() {
+        if (document.getElementById('season').value) showStep('step3');
+      }
+
+      function goToSummary() {
+        const div = document.getElementById('division').value;
+        const season = document.getElementById('season').value;
+        const teams = document.getElementById('teamCount').value;
+        const guidelines = document.getElementById('guidelines').value;
+        const weights = Array.from(document.querySelectorAll('input[name="stat_weight"]:checked')).map(cb => cb.value);
+
+        const summary = `Division: ${div}\nSeason:   ${season}\nTeams:    ${teams}\n\nWeighted Stats: ${weights.join(', ') || 'None'}\n\nGuidelines:\n${guidelines || 'N/A'}`;
+        
+        document.getElementById('summary-content').textContent = summary;
+        showStep('step4');
+      }
+
+      function startMockDraft() {
+        const config = {
+          division: document.getElementById('division').value,
+          season: document.getElementById('season').value,
+          teams: parseInt(document.getElementById('teamCount').value),
+          guidelines: document.getElementById('guidelines').value,
+          weightedStats: Array.from(document.querySelectorAll('input[name="stat_weight"]:checked')).map(cb => cb.value)
+        };
+
+        const btnStart = document.getElementById('btn-start');
+        const btnEdit = document.getElementById('btn-edit');
+        const statusDiv = document.getElementById('execution-status');
+
+        btnStart.disabled = true;
+        btnEdit.disabled = true;
+        btnStart.textContent = "Drafting (this may take 30-60s)...";
+        statusDiv.textContent = "AI is analyzing player data and running the snake draft...";
+
+        google.script.run
+          .withSuccessHandler(res => {
+            google.script.host.close();
+          })
+          .withFailureHandler(err => {
+            statusDiv.textContent = "Error: " + err.message;
+            statusDiv.className = "error";
+            btnStart.disabled = false;
+            btnEdit.disabled = false;
+            btnStart.textContent = "Start Mock Draft";
+          })
+          .runMockDraft(config);
+      }
+    </script>
+  </body>
+</html>
