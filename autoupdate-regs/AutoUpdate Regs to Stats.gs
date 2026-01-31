@@ -5,12 +5,15 @@
  * preparations. It automates the complex task of matching registration records,
  * performance stats, and challenge assignments.
  *
- * CURRENT VERSION: 2.2
+ * CURRENT VERSION: 2.3
  * +---------------------------------------------------------------------------------------------------+
  * |                                      CHANGE LOG                                                   |
  * +---------+-------------+---------------------------------------------------------------------------+
  * | VERSION | DATE        | DESCRIPTION                                                               |
  * +---------+-------------+---------------------------------------------------------------------------+
+ * | 2.3     | 2026-01-31  | Refactored AI infrastructure to use unified `GeminiClient` class.         |
+ * |         |             | Centralized API handling, retry logic, and JSON parsing reducing code     |
+ * |         |             | redundancy.                                                               |
  * | 2.2     | 2026-01-23  | Added Sanity Checker: Bi-directional validation between Registration     |
  * |         |             | and Draft_Stats. Identifies orphaned records, missing players, and       |
  * |         |             | generates timestamped report in "Sanity_Check_Results" sheet.            |
@@ -155,7 +158,7 @@ const DEBUG_FLAGS = {
   SCOUTING_ASSISTANT: false,
   DRAFT_INSIGHTS: false,
   CORE_SYNC: false,
-  NAME_MATCHING: true, // Enable to debug name matching issues
+  NAME_MATCHING: false, // Enable to debug name matching issues
 };
 
 // ============================================================================
@@ -814,6 +817,96 @@ function runSanityChecker() {
 // AI TOOLS (Negative Coaching Request Assistant, Scout Assistant, Draft Insights)
 // =================================================================================
 
+/**
+ * Unified Client for interacting with Gemini API.
+ * Handles authentication, retry logic, payload construction, and response parsing.
+ */
+class GeminiClient {
+  /**
+   * @param {string} model - e.g., "gemini-2.5-flash-lite"
+   * @param {number} temperature - Creativity level (0.0 to 1.0)
+   */
+  constructor(model = "gemini-2.5-flash-lite", temperature = 0.5) {
+    this.apiKey = API_KEY;
+    this.baseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    this.temperature = temperature;
+  }
+
+  /**
+   * Generates text content from the model.
+   * @param {string} prompt - The user prompt.
+   * @param {Object} options - { systemInstruction, maxTokens }
+   * @return {string} The generated text.
+   */
+  generateText(prompt, options = {}) {
+    const response = this._callApi(prompt, options);
+    return response.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  }
+
+  /**
+   * Generates and parses JSON content from the model.
+   * @param {string} prompt - The user prompt.
+   * @param {Object} options - { systemInstruction, maxTokens }
+   * @return {Object} The parsed JSON object.
+   */
+  generateJson(prompt, options = {}) {
+    // Force JSON mode
+    options.jsonMode = true;
+    const text = this.generateText(prompt, options);
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      // Improve error message with snippet of invalid text
+      const snippet = text.length > 50 ? text.slice(0, 50) + "..." : text;
+      throw new Error(`Failed to parse AI response as JSON (Response: ${snippet}): ${e.message}`);
+    }
+  }
+
+  _callApi(prompt, options) {
+    const payload = {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: this.temperature,
+        maxOutputTokens: options.maxTokens || 1000,
+      }
+    };
+
+    if (options.systemInstruction) {
+      payload.systemInstruction = {
+        parts: [{ text: options.systemInstruction }]
+      };
+    }
+
+    if (options.jsonMode) {
+      payload.generationConfig.responseMimeType = "application/json";
+    }
+
+    const url = `${this.baseUrl}?key=${this.apiKey}`;
+    const params = {
+      method: "POST",
+      contentType: "application/json",
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+    };
+
+    let lastError;
+    for (let i = 0; i < 5; i++) {
+      try {
+        const response = UrlFetchApp.fetch(url, params);
+        if (response.getResponseCode() === 200) {
+          return JSON.parse(response.getContentText());
+        }
+        lastError = new Error(`API Error ${response.getResponseCode()}: ${response.getContentText()}`);
+        Utilities.sleep(Math.pow(2, i) * 1000);
+      } catch (e) {
+        lastError = e;
+        if (i === 4) throw e;
+        Utilities.sleep(Math.pow(2, i) * 1000);
+      }
+    }
+    throw lastError;
+  }
+}
 
 // =================================================================================
 // AI TOOLS: Negative Coaching Request Assistant
@@ -913,10 +1006,44 @@ function runNegativeCoachAssistant() {
       const batch = items.slice(start, start + BATCH_SIZE);
 
       let labels;
+      
+      const prompt =
+        "ROLE & GOAL:\n" +
+        'You are a cautious youth baseball league administrator reviewing parent "Special Player Request" notes.\n' +
+        "Your ONLY task is to detect whether a parent is trying to keep their child off a specific coach's team or away from a particular family.\n" +
+        "Err on the side of caution, especially for any polite or indirect wording.\n\n" +
+        "INPUT:\n" +
+        "You will receive a JSON array of objects: [{ index: number, request: string }].\n" +
+        "Each 'request' is a single parent's note from the Special Player Requests column.\n\n" +
+        "LABELING RULES:\n" +
+        "- FLAG_STRONG   = clear, explicit request to AVOID a specific coach, team, or family (e.g. prior bad experience, conflict, safety concern).\n" +
+        '- FLAG_POSSIBLE = polite but still indicates avoiding or not wanting a specific coach/team/family (e.g. "would rather not be with Coach X again").\n' +
+        "- SAFE          = all other cases, including neutral or positive mentions of coaches, teams, or friends.\n" +
+        "- DO NOT mark FLAG_STRONG or FLAG_POSSIBLE just because a coach name or the word 'coach' appears. There must be negative or avoidant language in the sentence (not, avoid, don't want, rather not, bad experience, conflict, issue, etc.).\n" +
+        "- When truly uncertain, choose SAFE.\n" +
+        '- Examples that are SAFE: "wants to play for Coach Smith again", "would love to be with Coach Jones", "hopes to be with friends on Coach Lee\'s team".\n' +
+        "EXAMPLES (YOU MUST FOLLOW):\n" +
+        '1) "Request to be with a seasoned coach who understands and will work towards player development - had a new coach last fall and it was a bit of a bust" => FLAG_POSSIBLE.\n' +
+        '2) "He would prefer not to play for the Twins, he would not be a good fit with the coach." => FLAG_STRONG.\n' +
+        '3) "I kindly request that Owen not be placed on a team coached by Greg Nowick. Thank you!" => FLAG_STRONG.\n' +
+        '4) "Please, do not put on Stoffey teams. We have never requested anything but it was not a great experience." => FLAG_STRONG.\n\n' +
+        "OUTPUT FORMAT:\n" +
+        "Return a JSON object mapping row index to label. Example:\n" +
+        '{ "0": "FLAG_POSSIBLE", "5": "SAFE" }\n\n' +
+        "REQUESTS:\n" +
+        JSON.stringify(batch.map(it => ({ index: it.index, request: it.text })));
+
       try {
-        labels = callGeminiForRequestBatch(batch);
+        const client = new GeminiClient("gemini-2.5-flash-lite", 0.1);
+        labels = client.generateJson(prompt, {
+          maxTokens: 1024,
+          systemInstruction: "You are a cautious youth baseball league administrator focused on player safety and family comfort."
+        });
       } catch (e) {
         // On failure, err on the side of caution for this batch
+        if (DEBUG_FLAGS.NEGATIVE_COACH) {
+          logDebug("Negative Coach", "BATCH_ERROR", { error: e.message });
+        }
         labels = {};
         batch.forEach((item) => {
           labels[item.index] = "FLAG_POSSIBLE";
@@ -1016,7 +1143,14 @@ function processScoutingQuestion(userPrompt) {
     // Show loading message
     ui.alert("AI Scouting Assistant", "Analyzing draft board... This may take a moment.", ui.ButtonSet.OK);
     
-    const response = callGeminiScout(fullPrompt);
+    // Call Gemini via new Client
+    const client = new GeminiClient("gemini-2.5-flash", 0.7);
+    const response = client.generateText(fullPrompt, {
+       maxTokens: 2048,
+       systemInstruction: "You are an experienced youth baseball scout who analyzes players holistically, " +
+                "considering batting, pitching, fielding, age, maturity, and team dynamics. " +
+                "You provide actionable insights and think strategically about draft picks."
+    });
     
     // Log usage with standardized format
     const queryPreview = userPrompt.length > 50 ? userPrompt.slice(0, 50) + "..." : userPrompt;
@@ -1043,7 +1177,12 @@ function aiDraftSummary() {
     const draftContext = getDraftBoardContext(50, false);
     
     const prompt = `Analyze this draft board and provide a high-level executive summary including top talent trends.\n\nDATA:\n${JSON.stringify(draftContext.data)}`;
-    const response = callGemini(prompt);
+    
+    const client = new GeminiClient("gemini-2.5-flash-lite", 0.5);
+    const response = client.generateText(prompt, {
+       maxTokens: 1000,
+       systemInstruction: "You are a professional baseball scout. Your tone is analytical and concise."
+    });
     
     // Log usage with standardized format
     logAiActivity(
@@ -1057,424 +1196,6 @@ function aiDraftSummary() {
   } catch (e) {
     handleAiError(e, "Draft Insights");
   }
-}
-
-/**
- * Gemini caller for batched negative coach request analysis.
- * Uses JSON mode to return a mapping of row index → label.
- *
- * @param {{index:number,text:string}[]} items - Array of requests with row indices.
- * @return {Object<number,string>} Map of index -> FLAG_STRONG | FLAG_POSSIBLE | SAFE.
- */
-function callGeminiForRequestBatch(items) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${API_KEY}`;
-  const list = items
-    .map(
-      (it) => `{ "index": ${it.index}, "request": ${JSON.stringify(it.text)} }`,
-    )
-    .join(",\n  ");
-
-  const prompt =
-    "ROLE & GOAL:\n" +
-    'You are a cautious youth baseball league administrator reviewing parent "Special Player Request" notes.\n' +
-    "Your ONLY task is to detect whether a parent is trying to keep their child off a specific coach's team or away from a particular family.\n" +
-    "Err on the side of caution, especially for any polite or indirect wording.\n\n" +
-    "INPUT:\n" +
-    "You will receive a JSON array of objects: [{ index: number, request: string }].\n" +
-    "Each 'request' is a single parent's note from the Special Player Requests column.\n\n" +
-    "LABELING RULES:\n" +
-    "- FLAG_STRONG   = clear, explicit request to AVOID a specific coach, team, or family (e.g. prior bad experience, conflict, safety concern).\n" +
-    '- FLAG_POSSIBLE = polite but still indicates avoiding or not wanting a specific coach/team/family (e.g. "would rather not be with Coach X again").\n' +
-    "- SAFE          = all other cases, including neutral or positive mentions of coaches, teams, or friends.\n" +
-    "- DO NOT mark FLAG_STRONG or FLAG_POSSIBLE just because a coach name or the word 'coach' appears. There must be negative or avoidant language in the sentence (not, avoid, don't want, rather not, bad experience, conflict, issue, etc.).\n" +
-    "- When truly uncertain, choose SAFE.\n" +
-    '- Examples that are SAFE: "wants to play for Coach Smith again", "would love to be with Coach Jones", "hopes to be with friends on Coach Lee\'s team".\n' +
-    "EXAMPLES (YOU MUST FOLLOW):\n" +
-    '1) "Request to be with a seasoned coach who understands and will work towards player development - had a new coach last fall and it was a bit of a bust" => FLAG_POSSIBLE.\n' +
-    '2) "He would prefer not to play for the Twins, he would not be a good fit with the coach." => FLAG_STRONG.\n' +
-    '3) "I kindly request that Owen not be placed on a team coached by Greg Nowick. Thank you!" => FLAG_STRONG.\n' +
-    '4) "Please, do not put on Stoffey teams. We have never requested anything but it was not a great experience." => FLAG_STRONG.\n\n' +
-    "OUTPUT FORMAT:\n" +
-    "Return a JSON object mapping row index to label. Example:\n" +
-    '{ "0": "FLAG_POSSIBLE", "5": "SAFE" }\n\n' +
-    "REQUESTS:\n" +
-    `[
-  ${list}
-]`;
-
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    systemInstruction: {
-      parts: [
-        {
-          text: "You are a cautious youth baseball league administrator focused on player safety and family comfort.",
-        },
-      ],
-    },
-    generationConfig: {
-      responseMimeType: "application/json",
-      maxOutputTokens: 256,
-      temperature: 0.1,
-    },
-  };
-
-  let response;
-  for (let i = 0; i < 5; i++) {
-    try {
-      response = UrlFetchApp.fetch(url, {
-        method: "POST",
-        contentType: "application/json",
-        payload: JSON.stringify(payload),
-        muteHttpExceptions: true,
-      });
-      if (response.getResponseCode() === 200) break;
-      Utilities.sleep(Math.pow(2, i) * 1000);
-    } catch (e) {
-      if (i === 4) throw e;
-      Utilities.sleep(Math.pow(2, i) * 1000);
-    }
-  }
-  const statusCode = response.getResponseCode();
-  const bodyText = response.getContentText();
-
-  if (DEBUG_FLAGS.NEGATIVE_COACH) {
-    logDebug("Negative Coach", "BATCH_RESPONSE", {
-      statusCode,
-      itemsCount: items.length,
-      bodySnippet: bodyText.slice(0, 500),
-    });
-  }
-
-  const outer = JSON.parse(bodyText);
-  const rawText = outer.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!rawText) {
-    // Fall back: mark all as SAFE to avoid noisy false positives
-    if (DEBUG_FLAGS.NEGATIVE_COACH) {
-      logDebug("Negative Coach", "NO_RAWTEXT", {
-        outerSnippet: JSON.stringify(outer).slice(0, 500),
-      });
-    }
-    const fallback = {};
-    items.forEach((it) => {
-      fallback[it.index] = "SAFE";
-    });
-    return fallback;
-  }
-
-  try {
-    const parsed = JSON.parse(rawText);
-    if (DEBUG_FLAGS.NEGATIVE_COACH) {
-      logDebug("Negative Coach", "PARSED_LABELS", {
-        labels: parsed,
-        sampleRequests: items.slice(0, 5),
-      });
-    }
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch (e) {
-    if (DEBUG_FLAGS.NEGATIVE_COACH) {
-      logDebug("Negative Coach", "PARSE_ERROR", {
-        error: String(e),
-        rawTextSnippet: rawText.slice(0, 500),
-      });
-    }
-    const fallback = {};
-    items.forEach((it) => {
-      fallback[it.index] = "SAFE";
-    });
-    return fallback;
-  }
-}
-
-/**
- * Calls Gemini Flash (full model) for complex scouting analysis.
- * Uses higher token limit and reasoning capability than Lite version.
- *
- * @param {string} prompt - The prompt text to send to Gemini.
- * @return {string} Generated text or a fallback message.
- */
-function callGeminiScout(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`;
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    systemInstruction: {
-      parts: [
-        {
-          text: "You are an experienced youth baseball scout who analyzes players holistically, " +
-                "considering batting, pitching, fielding, age, maturity, and team dynamics. " +
-                "You provide actionable insights and think strategically about draft picks."
-        },
-      ],
-    },
-    generationConfig: {
-      maxOutputTokens: 2048,
-      temperature: 0.7,
-    },
-  };
-
-  let response;
-  for (let i = 0; i < 5; i++) {
-    try {
-      response = UrlFetchApp.fetch(url, {
-        method: "POST",
-        contentType: "application/json",
-        payload: JSON.stringify(payload),
-        muteHttpExceptions: true,
-      });
-      if (response.getResponseCode() === 200) break;
-      Utilities.sleep(Math.pow(2, i) * 1000);
-    } catch (e) {
-      if (i === 4) throw e;
-      Utilities.sleep(Math.pow(2, i) * 1000);
-    }
-  }
-
-  const json = JSON.parse(response.getContentText());
-  return (
-    json.candidates?.[0]?.content?.parts?.[0]?.text || "Scout unavailable - please try again."
-  );
-}
-
-/**
- * Displays a custom input dialog for asking scouting questions.
- * Larger and more user-friendly than the default ui.prompt().
- */
-function showAiScoutInputDialog() {
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <base target="_top">
-      <style>
-        body {
-          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-          padding: 20px;
-          background-color: #f9f9f9;
-          margin: 0;
-        }
-        .header {
-          background-color: #2c5aa0;
-          color: white;
-          padding: 12px 16px;
-          margin: -20px -20px 20px -20px;
-          border-radius: 4px 4px 0 0;
-        }
-        .header h3 {
-          margin: 0;
-          font-size: 16px;
-          font-weight: 600;
-        }
-        .example-box {
-          background-color: #e8f0fe;
-          padding: 12px;
-          border-radius: 4px;
-          margin-bottom: 20px;
-          border-left: 4px solid #2c5aa0;
-          font-size: 13px;
-        }
-        .example-box strong {
-          color: #1a73e8;
-        }
-        textarea {
-          width: 100%;
-          height: 200px;
-          padding: 12px;
-          border: 2px solid #ddd;
-          border-radius: 4px;
-          font-size: 14px;
-          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-          resize: vertical;
-          box-sizing: border-box;
-        }
-        textarea:focus {
-          outline: none;
-          border-color: #2c5aa0;
-        }
-        .button-container {
-          margin-top: 16px;
-          text-align: right;
-        }
-        button {
-          padding: 10px 20px;
-          font-size: 14px;
-          border: none;
-          border-radius: 4px;
-          cursor: pointer;
-          margin-left: 8px;
-        }
-        .btn-submit {
-          background-color: #2c5aa0;
-          color: white;
-        }
-        .btn-submit:hover {
-          background-color: #1a4d8f;
-        }
-        .btn-cancel {
-          background-color: #e0e0e0;
-          color: #333;
-        }
-        .btn-cancel:hover {
-          background-color: #d0d0d0;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="header">
-        <h3>Ask AI Scouting Assistant</h3>
-      </div>
-      
-      <div class="example-box">
-        <strong>Example Questions:</strong><br>
-        • "If our league prioritizes strong bats who can pitch, give me a list of the top 10 probable picks"<br>
-        • "Which players would be the best team captains based on their stats and maturity?"<br>
-        • "Compare the top 5 pitchers and recommend draft order"
-      </div>
-      
-      <label for="question" style="font-weight: 600; font-size: 14px; display: block; margin-bottom: 8px;">
-        Your Scouting Question:
-      </label>
-      <textarea id="question" placeholder="Enter your question here..."></textarea>
-      
-      <div class="button-container">
-        <button class="btn-cancel" onclick="google.script.host.close()">Cancel</button>
-        <button class="btn-submit" onclick="submitQuestion()">Submit Question</button>
-      </div>
-      
-      <script>
-        function submitQuestion() {
-          const question = document.getElementById('question').value.trim();
-          if (!question) {
-            alert('Please enter a question.');
-            return;
-          }
-          google.script.run
-            .withSuccessHandler(function() {
-              google.script.host.close();
-            })
-            .processScoutingQuestion(question);
-        }
-        
-        // Allow Enter key to submit (with Shift+Enter for new lines)
-        document.getElementById('question').addEventListener('keydown', function(e) {
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            submitQuestion();
-          }
-        });
-        
-        // Auto-focus the textarea
-        document.getElementById('question').focus();
-      </script>
-    </body>
-    </html>
-  `;
-  
-  const output = HtmlService.createHtmlOutput(html)
-    .setWidth(700)
-    .setHeight(500);
-  SpreadsheetApp.getUi().showModalDialog(output, 'AI Scouting Assistant');
-}
-
-/**
- * Displays AI scouting output in a large, user-friendly modal dialog.
- *
- * @param {string} title   - Dialog title.
- * @param {string} content - AI response text to display.
- * @param {string} userQuery - Original user question.
- */
-function showAiScoutDialog(title, content, userQuery) {
-  // Debug logging - check if new dimensions are being used
-  if (DEBUG_FLAGS.SCOUTING_ASSISTANT) {
-    logDebug("Scouting Assistant", "DIALOG_DIMENSIONS", {
-      width: 1000,
-      height: 900,
-      contentHeight: 600,
-      timestamp: new Date().toISOString()
-    });
-  }
-  
-  const html = `
-    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #f9f9f9;">
-      <div style="background-color: #2c5aa0; color: white; padding: 12px 16px; margin: -20px -20px 20px -20px; border-radius: 4px 4px 0 0;">
-        <h3 style="margin: 0; font-size: 16px; font-weight: 600;">Your Question</h3>
-      </div>
-      <div style="background-color: #e8f0fe; padding: 12px; border-radius: 4px; margin-bottom: 20px; border-left: 4px solid #2c5aa0;">
-        <p style="margin: 0; font-size: 13px; color: #333; font-style: italic;">"${userQuery}"</p>
-      </div>
-      
-      <div style="background-color: #2c5aa0; color: white; padding: 12px 16px; margin: 0 -20px 20px -20px;">
-        <h3 style="margin: 0; font-size: 16px; font-weight: 600;">AI Scout Analysis</h3>
-      </div>
-      <div style="background-color: white; padding: 16px; border-radius: 4px; border: 1px solid #ddd; height: 600px; overflow-y: scroll; overflow-x: hidden;">
-        <div style="white-space: pre-wrap; font-size: 14px; line-height: 1.7; color: #333;">${content}</div>
-      </div>
-      
-      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #ddd; font-size: 11px; color: #666; text-align: center;">
-        Powered by Gemini 2.5 Flash • Results are AI-generated suggestions • v2.0 (1000x900)
-      </div>
-    </div>
-  `;
-  
-  const output = HtmlService.createHtmlOutput(html)
-    .setWidth(1000)
-    .setHeight(900);
-  SpreadsheetApp.getUi().showModalDialog(output, title);
-}
-
-/**
- * Calls the Gemini model and returns the first text candidate, with
- * basic retry and a safe fallback.
- *
- * @param {string} prompt - The prompt text to send to Gemini.
- * @return {string} Generated text or a fallback message.
- */
-function callGemini(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${API_KEY}`;
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    systemInstruction: {
-      parts: [
-        {
-          text: "You are a professional baseball scout. Your tone is analytical and concise.",
-        },
-      ],
-    },
-  };
-
-  let response;
-  for (let i = 0; i < 5; i++) {
-    try {
-      response = UrlFetchApp.fetch(url, {
-        method: "POST",
-        contentType: "application/json",
-        payload: JSON.stringify(payload),
-        muteHttpExceptions: true,
-      });
-      if (response.getResponseCode() === 200) break;
-      Utilities.sleep(Math.pow(2, i) * 1000);
-    } catch (e) {
-      if (i === 4) throw e;
-      Utilities.sleep(Math.pow(2, i) * 1000);
-    }
-  }
-
-  const json = JSON.parse(response.getContentText());
-  return (
-    json.candidates?.[0]?.content?.parts?.[0]?.text || "Scout unavailable."
-  );
-}
-
-/**
- * Displays AI output in a modal dialog for easier reading.
- *
- * @param {string} title   - Dialog title.
- * @param {string} content - HTML/text content to display.
- */
-function showAiDialog(title, content) {
-  const html = `<div style="font-family: sans-serif; padding: 10px;"><div style="white-space: pre-wrap; font-size: 13px;">${content}</div></div>`;
-  const output = HtmlService.createHtmlOutput(html)
-    .setWidth(450)
-    .setHeight(350);
-  SpreadsheetApp.getUi().showModalDialog(output, title);
 }
 
 // ============================================================================
