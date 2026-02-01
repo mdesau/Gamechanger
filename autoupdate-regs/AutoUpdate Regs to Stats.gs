@@ -178,7 +178,7 @@ function onOpen() {
     .createMenu("AI Tools")
     .addItem("Negative Coach Request Assistant", "runNegativeCoachAssistant")
     .addItem("Ask AI Scouting Assistant", "askGeminiAdHoc")
-    .addItem("Mock Draft Generator", "showMockDraftDialog");
+    // .addItem("Mock Draft Generator", "showMockDraftDialog");
     // .addItem("Draft Insights", "aiDraftSummary");
 
   ui.createMenu("Gamechanger")
